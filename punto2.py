@@ -2,8 +2,8 @@
 # solve_subprob2.py
 #
 # Punto 2: elegir cualquier subconjunto de contenedores y de bolsitas
-# de modo que la oferta total cubra la demanda_por_bolsitaa total y se maximice:
-#   sum_{c in A'} 1            (cada contenedor vale 1)
+# de modo que la oferta total cubra la demanda_por_bolsita total y se maximice:
+#   sum_{c in A'} -10 (por ejemplo)           (cada contenedor vale -10)
 # + sum_{b in O'} sum_i demanda_por_bolsita[b][i]  (cada ítem en la bolsita vale 1)
 
 from pyscipopt import Model, quicksum
@@ -56,9 +56,9 @@ def solve_point2(cant_bolsitas, cant_items, cant_contenedores, demanda_por_bolsi
             name=f"Cover_item_{itm}"
         )
 
-    # Parámetros de beneficio
+    #Beneficios
     bagVal  = {b: sum(demanda_por_bolsita[b])   for b in range(cant_bolsitas)}    # suma de ítems en bolsa b
-    contVal = {c: 1                 for c in range(cant_contenedores)}  # cada contenedor vale 1 fijo
+    contVal = {c: -10                 for c in range(cant_contenedores)} 
 
     # Función objetivo
     model.setObjective(
@@ -70,7 +70,6 @@ def solve_point2(cant_bolsitas, cant_items, cant_contenedores, demanda_por_bolsi
     # Resolver
     model.optimize()
 
-    # Imprimir solución
     status = model.getStatus()
     print("Estado:", status)
     if status == "optimal":
@@ -83,6 +82,6 @@ def solve_point2(cant_bolsitas, cant_items, cant_contenedores, demanda_por_bolsi
         print("No se encontró solución óptima.")
 
 if __name__ == "__main__":
-    fn = "input_0001.txt"  # o el nombre real de tu archivo de entrada
+    fn = "input_0001.txt"
     cant_bolsitas, cant_items, cant_contenedores, demanda_por_bolsita, items_por_contenedor = read_data(fn)
     solve_point2(cant_bolsitas, cant_items, cant_contenedores, demanda_por_bolsita, items_por_contenedor)
