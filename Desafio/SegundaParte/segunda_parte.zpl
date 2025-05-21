@@ -1,0 +1,33 @@
+param Osize  := read "head.dat" as "1n" skip 0 use 1;
+param Isize := read "head.dat" as "2n" skip 0 use 1;
+param Asize := read "head.dat" as "3n" skip 0 use 1;
+
+set O := {0 ..  Osize-1};
+set I := {0 ..  Isize-1};
+set A := {0 ..  Asize-1};
+
+param u_oi[O*I] := read "orders.dat"  as "<1n> 2n,3n"  default 0 ;
+
+param u_ai[A*I] := read "aisles.dat" as "<1n> 2n,3n"  default 0 ;
+
+set Afix := { read "fixed_aisles.dat" as "<n+>" };
+
+param LB :=  read "limits.dat" as "1n" skip 0 use 1;
+param UB :=  read "limits.dat" as "2n" skip 0 use 1;
+
+# 3.  Variables
+
+var x[O] binary; 
+
+# 4.  Objetivo
+
+maximize total_units: sum <o,i> in O*I: u_oi[o,i] * x[o];  # max ordenes seleccionadas
+
+# 5.  Restricciones
+
+subto wave_lower:   sum <o,i> in O*I: u_oi[o,i] * x[o] >= LB;
+subto wave_upper:   sum <o,i> in O*I: u_oi[o,i] * x[o] <= UB;
+
+subto coverage:
+      forall <i> in I:
+            sum <o> in O: u_oi[o,i]*x[o] <= sum <a> in Afix: u_ai[a,i];
