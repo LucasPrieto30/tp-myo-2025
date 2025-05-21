@@ -6,8 +6,7 @@
 from pyscipopt import Model, quicksum
 import sys
 
-# ---------------------------------------------------------------------------
-# 1. Lectura de datos
+# 1. datos
 # ---------------------------------------------------------------------------
 def read_data(fname_input, fname_fixed):
     """
@@ -50,7 +49,6 @@ def read_data(fname_input, fname_fixed):
             demanda_por_bolsita, items_por_pasillo,
             pasillos_fijos, LB, UB)
 
-# ---------------------------------------------------------------------------
 # 2. Modelo
 # ---------------------------------------------------------------------------
 def solve(cant_bolsitas, cant_items, cant_pasillos,
@@ -81,7 +79,7 @@ def solve(cant_bolsitas, cant_items, cant_pasillos,
             name=f"Cover_item_{i}"
         )
 
-    # Objetivo: maximizar unidades
+    # Objetivo
     model.setObjective(total_units, "maximize")
     model.optimize()
 

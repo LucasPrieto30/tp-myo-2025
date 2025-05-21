@@ -7,7 +7,7 @@ def main():
         for line in f:
             o, i, u = map(int, line.split())
             total_por_orden[o] += u
-    # Muestra las 20 órdenes con más unidades (puedes cambiar n=20)
+    # Muestra las 20 órdenes con más unidades
     for o, u in total_por_orden.most_common(20):
         print(f"orden {o:3d} : {u} unidades")
 

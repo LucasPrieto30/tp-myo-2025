@@ -1,6 +1,5 @@
 
-# 1.  Datos principales
-
+# 1. Datos
 param Osize  := read "head.dat" as "1n" skip 0 use 1;
 param Isize := read "head.dat" as "2n" skip 0 use 1;
 param Asize := read "head.dat" as "3n" skip 0 use 1;
@@ -16,10 +15,6 @@ param u_ai[A*I] := read "aisles.dat" as "<1n> 2n,3n"  default 0 ;
 param LB :=  read "limits.dat" as "1n" skip 0 use 1;
 param UB :=  read "limits.dat" as "2n" skip 0 use 1;
 param K  :=  read "limits.dat" as "3n" skip 0 use 1;   # |A†| fijado
-
-# Beneficios
-#param b_oi[O*I] := 1;
-#param b_a[A]    := 1;
 
 # 3.  Variables
 

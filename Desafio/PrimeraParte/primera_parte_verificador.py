@@ -1,4 +1,3 @@
-# check_solution.py  -----------------------------------------------
 from collections import defaultdict
 
 def load_data():
@@ -29,7 +28,7 @@ def check(O_sel, A_sel):
     """
     O_sel = conjunto (set) de órdenes elegidas
     A_sel = conjunto (set) de pasillos elegidos
-    Devuelve (True,"OK") si la selección es factible, o (False,mensaje).
+    Devuelve ("OK") si la selección es factible, o (False,mensaje).
     """
     O, I, A, u_oi, u_ai, LB, UB, K = load_data()
 

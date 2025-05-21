@@ -23,7 +23,7 @@ def main(fname, K):
 
     print(O, I, A, file=head)
 
-    # órdenes (bolsitas)
+    # órdenes
     for o in range(O):
         k = tokens[pos]; pos += 1
         for _ in range(k):
@@ -32,7 +32,7 @@ def main(fname, K):
             pos += 2
             print(o, item, qty, file=orders)
 
-    # pasillos (containers)
+    # pasillos
     for a in range(A):
         l = tokens[pos]; pos += 1
         for _ in range(l):
@@ -55,5 +55,5 @@ if __name__ == "__main__":
         print("Uso:  python split_input_k.py  input_0001.txt  [K]")
         sys.exit(1)
     input_file = sys.argv[1]
-    K_value = int(sys.argv[2]) if len(sys.argv) == 3 else 1   # valor por defecto
+    K_value = int(sys.argv[2]) if len(sys.argv) == 3 else 1
     main(input_file, K_value)

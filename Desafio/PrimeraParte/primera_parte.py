@@ -35,7 +35,7 @@ def read_data(fname):
     return O, I, A, demand, supply, LB, UB
 
 # --------------------------------------------------------------------
-# 2. Solución con SCIP
+# 2. Solución
 # --------------------------------------------------------------------
 def solve(O, I, A, demand, supply, LB, UB, K):
     m = Model("Desafio_K")
@@ -49,11 +49,11 @@ def solve(O, I, A, demand, supply, LB, UB, K):
                             for b in range(O)
                             for i in range(I) )
 
-    # 2.1. Límite inferior y superior
+    # Límites
     m.addCons(total_units >= LB, name="LB_wave")
     m.addCons(total_units <= UB, name="UB_wave")
 
-    # 2.2. Cobertura por ítem
+    # Cobertura por ítem
     for i in range(I):
         m.addCons(
             quicksum( supply[a][i] * x[a] for a in range(A) ) >=
@@ -64,7 +64,7 @@ def solve(O, I, A, demand, supply, LB, UB, K):
     # 2.3. Exactamente K pasillos
     m.addCons( quicksum(x[a] for a in range(A)) == K , name="K_aisles")
 
-    # 2.4. Objetivo = maximizar copias totales
+    # Objetivo
     m.setObjective(total_units, sense="maximize")
 
     # Resolver
