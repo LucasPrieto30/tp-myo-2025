@@ -204,7 +204,7 @@ class Columns:
         start = time.time(); rounds = 0
         while True:
             rem = max(0.01, tlimit - (time.time() - start))
-            # m.setParam("limits/time", rem)
+            m.setParam("limits/time", rem)
             m.optimize()
             if m.getStatus() != "optimal":
                 break
