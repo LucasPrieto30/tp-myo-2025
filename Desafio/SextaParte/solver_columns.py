@@ -7,7 +7,7 @@ Resuelve el “wave picking” con:
   • subproblema de pricing 0-1 knapsack por pasillo
 """
 
-import sys, time
+import sys, time, os, json
 from pyscipopt import Model, quicksum
 
 # --------------------------------------------------------------------------- #
@@ -49,11 +49,10 @@ def read_instance(fname):
         LB, UB = map(int, f.readline().split())
     return O, I, A, demand, supply, LB, UB
 
-
 # --------------------------------------------------------------------------- #
 # pricing: knapsack 0-1
 # --------------------------------------------------------------------------- #
-def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order, 
+def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
                  demand, supply, LB, UB):
     O = len(demand)
     I = len(supply[0])
@@ -65,7 +64,7 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
         rc_part -= sum(dual_cov[i]*demand[o][i] for i in range(I))
         rc_part -= units_o[o]*dual_lb
         rc_part -= units_o[o]*dual_ub
-        rc_part -= dual_order[o]
+        # rc_part -= dual_order[o]
         price_o.append(rc_part)
 
     knap = Model(f"pricing_{a}")
@@ -90,7 +89,6 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
         return None
     sel   = [o for o in z if knap.getVal(z[o]) > 0.5]
     units = sum(units_o[o] for o in sel)
-    print(f"------------------------------------[pricing] a={a:3d}  rc={rc:6.2f}  units={units:3d}  sel={sel}------------------------------------", flush=True)
     return sel, units, rc
 
 
@@ -122,16 +120,37 @@ class Columns:
                 break
         return sel, tot
 
+    def _heaviest_order(self, a):
+        """Índice de la orden con más unidades que cabe completa en el pasillo a."""
+        best, units = None, -1
+        for o in range(self.O):
+            if all(self.demand[o][i] <= self.supply[a][i] for i in range(self.I)):
+                u = sum(self.demand[o])
+                if u > units: best, units = o, u
+        return ([best], units) if best is not None else ([], 0)
+
+    def _lightest_order(self, a):
+        best, units = None, 10**9
+        for o in range(self.O):
+            if all(self.demand[o][i] <= self.supply[a][i] for i in range(self.I)):
+                u = sum(self.demand[o])
+                if 0 < u < units: best, units = o, u
+        return ([best], units) if best is not None else ([], 0)
+
     # ------------------------- RMP(k) inicial ------------------------------
     def _build_rmp(self, k):
         m = Model(f"RMP_k{k}")
+        try:
+            m.hideOutput()              # PySCIPOpt ≥ 4.3
+        except AttributeError:
+            m.setParam("display/verblevel", 0)
         m.setMaximize()
         zero  = m.addVar(lb=0, ub=0, name="zero")
         expr0 = 0 * zero    
-        order_cons = {
-            o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
-            for o in range(self.O)
-        }                # Expr constante 0
+        # order_cons = {
+        #     o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
+        #     for o in range(self.O)
+        # }                # Expr constante 0
         cov   = {i: m.addCons(expr0 >= 0,            name=f"cov_{i}")
                  for i in range(self.I)}
         lb    = m.addCons(expr0 >= self.LB,          name="LB")
@@ -155,27 +174,43 @@ class Columns:
 
         # una columna semilla por pasillo
         for a in range(self.A):
-            orders, units = self._greedy_pattern(a)
-            if not orders:                       # columna "vacía" suave
-                v = m.addVar(vtype="B", obj=0, name=f"col_{a}_0")
+            # ① patrón maximal (el viejo greedy)
+            max_orders, max_units = self._greedy_pattern(a)
+            seed_patterns = []
+            if max_orders:
+                seed_patterns.append((max_orders, max_units))
+
+            # ② pedido más pesado
+            heavy, u_h = self._heaviest_order(a)
+            if heavy and (heavy != max_orders):
+                seed_patterns.append((heavy, u_h))
+
+            # ③ pedido más liviano
+            light, u_l = self._lightest_order(a)
+            if light and light not in seed_patterns:
+                seed_patterns.append((light, u_l))
+
+            # ---- crear variables para TODOS los patrones hallados ----
+            if not seed_patterns:                       # ningún pedido cabe en ‘a’
+                v = m.addVar(vtype="B", obj=0, name=f"col_{a}_void")
                 add_coef(m, card, v, 1)
                 cols[(a, frozenset())] = v
                 continue
 
-            vname = f"col_{a}_" + "_".join(map(str, orders))
-            v = m.addVar(vtype="B", obj=units, name=vname)
-            for i in range(self.I):
-                q = sum(self.demand[o][i] for o in orders)
-                if q: add_coef(m, cov[i], v, q)
-            add_coef(m, lb,   v, units)
-            add_coef(m, ub,   v, units)
-            add_coef(m, card, v, 1)
-            for o in orders:
-                add_coef(m, order_cons[o], v, 1) 
-            cols[(a, frozenset(orders))] = v
-        # m.writeProblem(f"rmp_k{k}_init.lp")
+            for idx,(orders,units) in enumerate(seed_patterns):
+                vname = f"col_{a}_{idx}_" + "_".join(map(str, orders))
+                v = m.addVar(vtype="B", obj=units, name=vname)
+                for i in range(self.I):
+                    q = sum(self.demand[o][i] for o in orders)
+                    if q: add_coef(m, cov[i], v, q)
+                add_coef(m, lb,   v, units)
+                add_coef(m, ub,   v, units)
+                add_coef(m, card, v, 1)
+                # for o in orders:
+                #     add_coef(m, order_cons[o], v, 1)
+                cols[(a, frozenset(orders))] = v
         return {"model": m, "cols": cols, "cov": cov,
-                "lb": lb, "ub": ub, "card": card,  "order_cons": order_cons}      #  ← añadido
+                "lb": lb, "ub": ub, "card": card}
 
     # --------------------- añade columna nueva ----------------------------
     def _add_column(self, pack, a, orders, units):
@@ -191,8 +226,8 @@ class Columns:
         add_coef(m, pack["lb"],   v, units)
         add_coef(m, pack["ub"],   v, units)
         add_coef(m, pack["card"], v, 1)
-        for o in orders:                         #  <-- fuera del if anterior
-            add_coef(m, pack["order_cons"][o], v, 1)
+        # for o in orders:
+        #     add_coef(m, pack["order_cons"][o], v, 1)
         pack["cols"][key] = v
 
     # -------------------- RMP(k) con column generation --------------------
@@ -213,10 +248,10 @@ class Columns:
             dual_lb  = get_dual(m, pack["lb"])
             dual_ub  = get_dual(m, pack["ub"])
             dual_k   = get_dual(m, pack["card"])
-            dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
+            # dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
             any_new = False
             for a in range(self.A):
-                priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
+                priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
                                       self.demand, self.supply,
                                       self.LB, self.UB)
                 if priced:
@@ -231,7 +266,7 @@ class Columns:
             rounds += 1
             if (time.time()-start) >= 0.8*tlimit:
                 break
-
+        self._last_model = pack["model"]
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
@@ -257,6 +292,7 @@ class Columns:
                 m.chgVarUb(var, 0)
         # m.setParam("limits/time", max(tlimit, 0.1))
         m.optimize()
+        self._last_model = pack["model"]
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
@@ -296,7 +332,9 @@ class Columns:
             if m.getVal(v) > 0.5 and v.name.startswith("col_"):
                 p = v.name.split("_")
                 ais.add(int(p[1]))
-                ords.update(int(x) for x in p[2:])
+                for tok in p[2:]:
+                    if tok.isdigit():        # ‘void’ u otros tags se omiten
+                        ords.add(int(tok))
         return {"obj": int(m.getObjVal()), "aisles": ais, "orders": ords}
 
 # --------------------------------------------------------------------------- #
@@ -304,13 +342,27 @@ class Columns:
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("uso: python columns_part5.py input_0001.txt [tiempo_seg]")
         sys.exit(1)
-
+    
     tlimit = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     instance = sys.argv[1]
 
     solver = Columns(instance)
+    tic = time.time()
     best = solver.Opt_ExplorarCantidadPasillos(tlimit)
-    print("\n== Mejor ola ==")
-    print(best)
+    elapsed  = time.time() - tic                       # segundos reales
+    # print(json.dumps(best))
+    if len(sys.argv) > 3:                      # run_batch pasa "outfile"
+        out_file = sys.argv[3]
+        with open(out_file, "w") as f:
+            json.dump(best, f)
+    m = solver._last_model
+    total_c  = m.getNConss()
+    total_v  = m.getNVars()
+    rmp_v    = sum(1 for v in m.getVars() if v.vtype() == "B")  # aprox. “vars en el RMP”
+    dual_bd  = m.getDualbound()
+
+    print(f"METRICS inst={os.path.basename(instance)} "
+        f"conss={total_c} vars={total_v} vars_rmp={rmp_v} "
+        f"dual={int(dual_bd)} obj={best['obj'] if best else 'NA'} "
+        f"time={elapsed:.1f}")

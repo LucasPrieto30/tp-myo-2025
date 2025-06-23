@@ -7,7 +7,7 @@ Resuelve el “wave picking” con:
   • subproblema de pricing 0-1 knapsack por pasillo
 """
 
-import sys, time
+import sys, time, os, json
 from pyscipopt import Model, quicksum
 
 # --------------------------------------------------------------------------- #
@@ -53,7 +53,7 @@ def read_instance(fname):
 # --------------------------------------------------------------------------- #
 # pricing: knapsack 0-1
 # --------------------------------------------------------------------------- #
-def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order, 
+def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
                  demand, supply, LB, UB):
     O = len(demand)
     I = len(supply[0])
@@ -65,7 +65,7 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
         rc_part -= sum(dual_cov[i]*demand[o][i] for i in range(I))
         rc_part -= units_o[o]*dual_lb
         rc_part -= units_o[o]*dual_ub
-        rc_part -= dual_order[o]
+        # rc_part -= dual_order[o]
         price_o.append(rc_part)
 
     knap = Model(f"pricing_{a}")
@@ -125,13 +125,17 @@ class Columns:
     # ------------------------- RMP(k) inicial ------------------------------
     def _build_rmp(self, k):
         m = Model(f"RMP_k{k}")
+        try:
+            m.hideOutput()
+        except AttributeError:
+            m.setParam("display/verblevel", 0)
         m.setMaximize()
         zero  = m.addVar(lb=0, ub=0, name="zero")
         expr0 = 0 * zero    
-        order_cons = {
-            o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
-            for o in range(self.O)
-        }                # Expr constante 0
+        # order_cons = {
+        #     o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
+        #     for o in range(self.O)
+        # }                # Expr constante 0
         cov   = {i: m.addCons(expr0 >= 0,            name=f"cov_{i}")
                  for i in range(self.I)}
         lb    = m.addCons(expr0 >= self.LB,          name="LB")
@@ -170,12 +174,12 @@ class Columns:
             add_coef(m, lb,   v, units)
             add_coef(m, ub,   v, units)
             add_coef(m, card, v, 1)
-            for o in orders:
-                add_coef(m, order_cons[o], v, 1) 
+            # for o in orders:
+            #     add_coef(m, order_cons[o], v, 1) 
             cols[(a, frozenset(orders))] = v
         # m.writeProblem(f"rmp_k{k}_init.lp")
         return {"model": m, "cols": cols, "cov": cov,
-                "lb": lb, "ub": ub, "card": card,  "order_cons": order_cons}      #  ← añadido
+                "lb": lb, "ub": ub, "card": card}
 
     # --------------------- añade columna nueva ----------------------------
     def _add_column(self, pack, a, orders, units):
@@ -191,8 +195,8 @@ class Columns:
         add_coef(m, pack["lb"],   v, units)
         add_coef(m, pack["ub"],   v, units)
         add_coef(m, pack["card"], v, 1)
-        for o in orders:                         #  <-- fuera del if anterior
-            add_coef(m, pack["order_cons"][o], v, 1)
+        # for o in orders:                         #  <-- fuera del if anterior
+        #     add_coef(m, pack["order_cons"][o], v, 1)
         pack["cols"][key] = v
 
     # -------------------- RMP(k) con column generation --------------------
@@ -204,7 +208,7 @@ class Columns:
         start = time.time(); rounds = 0
         while True:
             rem = max(0.01, tlimit - (time.time() - start))
-            m.setParam("limits/time", rem)
+            # m.setParam("limits/time", rem)
             m.optimize()
             if m.getStatus() != "optimal":
                 break
@@ -213,10 +217,10 @@ class Columns:
             dual_lb  = get_dual(m, pack["lb"])
             dual_ub  = get_dual(m, pack["ub"])
             dual_k   = get_dual(m, pack["card"])
-            dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
+            # dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
             any_new = False
             for a in range(self.A):
-                priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
+                priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
                                       self.demand, self.supply,
                                       self.LB, self.UB)
                 if priced:
@@ -231,7 +235,7 @@ class Columns:
             rounds += 1
             if (time.time()-start) >= 0.8*tlimit:
                 break
-
+        self._last_model = pack["model"]        
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
@@ -257,6 +261,7 @@ class Columns:
                 m.chgVarUb(var, 0)
         # m.setParam("limits/time", max(tlimit, 0.1))
         m.optimize()
+        self._last_model = pack["model"]
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
@@ -304,13 +309,27 @@ class Columns:
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("uso: python columns_part5.py input_0001.txt [tiempo_seg]")
         sys.exit(1)
 
     tlimit = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     instance = sys.argv[1]
 
     solver = Columns(instance)
+    tic = time.time()
     best = solver.Opt_ExplorarCantidadPasillos(tlimit)
-    print("\n== Mejor ola ==")
-    print(best)
+    elapsed  = time.time() - tic                       # segundos reales
+    # print(json.dumps(best))
+    if len(sys.argv) > 3: 
+        out_file = sys.argv[3]
+        with open(out_file, "w") as f:
+            json.dump(best, f)
+    m = solver._last_model
+    total_c  = m.getNConss()
+    total_v  = m.getNVars()
+    rmp_v    = sum(1 for v in m.getVars() if v.vtype() == "B")
+    dual_bd  = m.getDualbound()
+
+    print(f"METRICS inst={os.path.basename(instance)} "
+        f"conss={total_c} vars={total_v} vars_rmp={rmp_v} "
+        f"dual={int(dual_bd)} obj={best['obj'] if best else 'NA'} "
+        f"time={elapsed:.1f}")
