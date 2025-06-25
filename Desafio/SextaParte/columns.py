@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Parte 5 – Column Generation puro (patrones pasillo-pedidos)
+Parte 6 – Column Generation puro (patrones pasillo-pedidos)
 -----------------------------------------------------------
 Resuelve el “wave picking” con:
   • RMP(k)  – columnas = (pasillo, subconjunto de órdenes)
@@ -10,9 +10,6 @@ Resuelve el “wave picking” con:
 import sys, time, os, json
 from pyscipopt import Model, quicksum
 
-# --------------------------------------------------------------------------- #
-# utilidades genéricas
-# --------------------------------------------------------------------------- #
 def add_coef(model, cons, var, coef):
     if hasattr(model, "addCoefLinear"):
         model.addCoefLinear(cons, var, coef)
@@ -28,9 +25,7 @@ def get_dual(model, cons):
         return 0.0                   # fila eliminada en presolve
 
 
-# --------------------------------------------------------------------------- #
 # lectura de instancia
-# --------------------------------------------------------------------------- #
 def read_instance(fname):
     with open(fname) as f:
         O, I, A = map(int, f.readline().split())
@@ -50,9 +45,7 @@ def read_instance(fname):
     return O, I, A, demand, supply, LB, UB
 
 
-# --------------------------------------------------------------------------- #
-# pricing: knapsack 0-1
-# --------------------------------------------------------------------------- #
+# pricing
 def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
                  demand, supply, LB, UB):
     O = len(demand)
@@ -93,10 +86,6 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
     print(f"------------------------------------[pricing] a={a:3d}  rc={rc:6.2f}  units={units:3d}  sel={sel}------------------------------------", flush=True)
     return sel, units, rc
 
-
-# --------------------------------------------------------------------------- #
-# clase principal
-# --------------------------------------------------------------------------- #
 class Columns:
     def __init__(self, fname):
         (self.O, self.I, self.A,
@@ -105,7 +94,7 @@ class Columns:
         self.rmp_cache = {}          # un modelo por valor de k
         self.best_sol  = None
 
-    # ---------------- patrón greed max por pasillo -------------------------
+    # ---------------- patrón semilla max por pasillo -------------------------
     def _greedy_pattern(self, a):
         units_o = [(o, sum(self.demand[o])) for o in range(self.O)]
         units_o.sort(key=lambda t: -t[1])
@@ -122,7 +111,7 @@ class Columns:
                 break
         return sel, tot
 
-    # ------------------------- RMP(k) inicial ------------------------------
+    #RMP(k) inicial
     def _build_rmp(self, k):
         m = Model(f"RMP_k{k}")
         try:
@@ -135,7 +124,7 @@ class Columns:
         # order_cons = {
         #     o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
         #     for o in range(self.O)
-        # }                # Expr constante 0
+        # }
         cov   = {i: m.addCons(expr0 >= 0,            name=f"cov_{i}")
                  for i in range(self.I)}
         lb    = m.addCons(expr0 >= self.LB,          name="LB")
@@ -145,13 +134,13 @@ class Columns:
         cols = {}
 
         # dummy único (factibiliza Σx=k y LB/UB)
-        dummy = m.addVar(vtype="B", obj=-1e6, name="dummy")     #  <<<<  -1e6
+        dummy = m.addVar(vtype="B", obj=-1e6, name="dummy")
         add_coef(m, lb,   dummy, self.LB)
         add_coef(m, ub,   dummy, self.LB)
         add_coef(m, card, dummy, 1)
         cols[("dummy", frozenset())] = dummy
 
-        # slack global (añade LB unidades si fuera necesario)
+        # slack global
         slack = m.addVar(vtype="B", obj=-1e-3, name="slack")
         add_coef(m, lb,  slack, self.LB)
         add_coef(m, ub,  slack, self.LB)
@@ -160,7 +149,7 @@ class Columns:
         # una columna semilla por pasillo
         for a in range(self.A):
             orders, units = self._greedy_pattern(a)
-            if not orders:                       # columna "vacía" suave
+            if not orders: # columna "vacía" suave
                 v = m.addVar(vtype="B", obj=0, name=f"col_{a}_0")
                 add_coef(m, card, v, 1)
                 cols[(a, frozenset())] = v
@@ -181,7 +170,7 @@ class Columns:
         return {"model": m, "cols": cols, "cov": cov,
                 "lb": lb, "ub": ub, "card": card}
 
-    # --------------------- añade columna nueva ----------------------------
+    #añade columna nueva ----------------------------
     def _add_column(self, pack, a, orders, units):
         key = (a, frozenset(orders))
         if key in pack["cols"]:
@@ -195,11 +184,11 @@ class Columns:
         add_coef(m, pack["lb"],   v, units)
         add_coef(m, pack["ub"],   v, units)
         add_coef(m, pack["card"], v, 1)
-        # for o in orders:                         #  <-- fuera del if anterior
+        # for o in orders: 
         #     add_coef(m, pack["order_cons"][o], v, 1)
         pack["cols"][key] = v
 
-    # -------------------- RMP(k) con column generation --------------------
+    #RMP(k) con column generation --------------------
     def Opt_cantidadPasillosFija(self, k, tlimit):
         if k not in self.rmp_cache:
             self.rmp_cache[k] = self._build_rmp(k)
@@ -228,7 +217,7 @@ class Columns:
                     m.freeTransform() 
                     self._add_column(pack, a, sel, units)
                     any_new = True
-            if not any_new:                # ¡no queda patrón con RC>0!
+            if not any_new:
                 break
               
 
@@ -242,22 +231,22 @@ class Columns:
     def Opt_PasillosFijos(self, pasillos, tlimit):
         """
         Reoptimiza el mejor k fijando exactamente los pasillos =1/0.
-        `pasillos` es un set de índices que deben quedar en 1.
+        pasillos es un set de índices que deben quedar en 1.
         """
         k = len(pasillos)
         # ---- crea un RMP nuevo desde cero -------------
         pack = self._build_rmp(k)                 # modelo limpio
         m    = pack["model"]
 
-        # fija bounds *antes* de transformar
+        # fija bounds antes de transformar
         for a in range(self.A):
             var = pack["cols"].get((a, frozenset()))
             if var is None:
                 continue
-            if a in pasillos:           # pasillos que deben estar
+            if a in pasillos:   # pasillos que deben estar
                 m.chgVarLb(var, 1)
                 m.chgVarUb(var, 1)
-            else:                       # pasillos prohibidos
+            else:     # pasillos prohibidos
                 m.chgVarUb(var, 0)
         # m.setParam("limits/time", max(tlimit, 0.1))
         m.optimize()
@@ -304,9 +293,7 @@ class Columns:
                 ords.update(int(x) for x in p[2:])
         return {"obj": int(m.getObjVal()), "aisles": ais, "orders": ords}
 
-# --------------------------------------------------------------------------- #
-# main
-# --------------------------------------------------------------------------- #
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(1)
@@ -317,7 +304,7 @@ if __name__ == "__main__":
     solver = Columns(instance)
     tic = time.time()
     best = solver.Opt_ExplorarCantidadPasillos(tlimit)
-    elapsed  = time.time() - tic                       # segundos reales
+    elapsed  = time.time() - tic
     # print(json.dumps(best))
     if len(sys.argv) > 3: 
         out_file = sys.argv[3]

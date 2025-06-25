@@ -70,15 +70,20 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
         return None
     sel   = [o for o in z if knap.getVal(z[o]) > 0.5]
     units = sum(units_o[o] for o in sel)
+    print(f"------------------------------------[pricing] a={a:3d}  rc={rc:6.2f}  units={units:3d}  sel={sel}------------------------------------", flush=True)
     return sel, units, rc
+
 class Columns:
     def __init__(self, fname):
         (self.O, self.I, self.A,
          self.demand, self.supply,
          self.LB, self.UB) = read_instance(fname)
-        self.rmp_cache = {}     
+        self.rmp_cache = {}
         self.best_sol  = None
+        self.zero_streak = {}#   key → cuántas iteraciones lleva en 0
+        self.purge_after = 5
 
+    # ---------------- patrón greed max por pasillo -------------------------
     def _greedy_pattern(self, a):
         units_o = [(o, sum(self.demand[o])) for o in range(self.O)]
         units_o.sort(key=lambda t: -t[1])
@@ -95,23 +100,7 @@ class Columns:
                 break
         return sel, tot
 
-    def _heaviest_order(self, a):
-        """Índice de la orden con más unidades que cabe completa en el pasillo a."""
-        best, units = None, -1
-        for o in range(self.O):
-            if all(self.demand[o][i] <= self.supply[a][i] for i in range(self.I)):
-                u = sum(self.demand[o])
-                if u > units: best, units = o, u
-        return ([best], units) if best is not None else ([], 0)
-
-    def _lightest_order(self, a):
-        best, units = None, 10**9
-        for o in range(self.O):
-            if all(self.demand[o][i] <= self.supply[a][i] for i in range(self.I)):
-                u = sum(self.demand[o])
-                if 0 < u < units: best, units = o, u
-        return ([best], units) if best is not None else ([], 0)
-
+    #RMP(k) inicial ------------------------------
     def _build_rmp(self, k):
         m = Model(f"RMP_k{k}")
         try:
@@ -133,55 +122,44 @@ class Columns:
 
         cols = {}
 
-        dummy = m.addVar(vtype="B", obj=-1e6, name="dummy")    
+        # dummy único (factibiliza Σx=k y LB/UB)
+        dummy = m.addVar(vtype="B", obj=-1e6, name="dummy")
         add_coef(m, lb,   dummy, self.LB)
         add_coef(m, ub,   dummy, self.LB)
         add_coef(m, card, dummy, 1)
         cols[("dummy", frozenset())] = dummy
 
+        # slack global
         slack = m.addVar(vtype="B", obj=-1e-3, name="slack")
         add_coef(m, lb,  slack, self.LB)
         add_coef(m, ub,  slack, self.LB)
         cols[("slack", frozenset())] = slack
 
+        # una columna semilla por pasillo
         for a in range(self.A):
-            max_orders, max_units = self._greedy_pattern(a)
-            seed_patterns = []
-            if max_orders:
-                seed_patterns.append((max_orders, max_units))
-
-            # pedido más pesado
-            heavy, u_h = self._heaviest_order(a)
-            if heavy and (heavy != max_orders):
-                seed_patterns.append((heavy, u_h))
-
-            #  pedido más liviano
-            light, u_l = self._lightest_order(a)
-            if light and light not in seed_patterns:
-                seed_patterns.append((light, u_l))
-
-            #crear variables para TODOS los patrones hallados ----
-            if not seed_patterns:     # ningún pedido cabe en ‘a’
-                v = m.addVar(vtype="B", obj=0, name=f"col_{a}_void")
+            orders, units = self._greedy_pattern(a)
+            if not orders:
+                v = m.addVar(vtype="B", obj=0, name=f"col_{a}_0")
                 add_coef(m, card, v, 1)
                 cols[(a, frozenset())] = v
                 continue
 
-            for idx,(orders,units) in enumerate(seed_patterns):
-                vname = f"col_{a}_{idx}_" + "_".join(map(str, orders))
-                v = m.addVar(vtype="B", obj=units, name=vname)
-                for i in range(self.I):
-                    q = sum(self.demand[o][i] for o in orders)
-                    if q: add_coef(m, cov[i], v, q)
-                add_coef(m, lb,   v, units)
-                add_coef(m, ub,   v, units)
-                add_coef(m, card, v, 1)
-                # for o in orders:
-                #     add_coef(m, order_cons[o], v, 1)
-                cols[(a, frozenset(orders))] = v
+            vname = f"col_{a}_" + "_".join(map(str, orders))
+            v = m.addVar(vtype="B", obj=units, name=vname)
+            for i in range(self.I):
+                q = sum(self.demand[o][i] for o in orders)
+                if q: add_coef(m, cov[i], v, q)
+            add_coef(m, lb,   v, units)
+            add_coef(m, ub,   v, units)
+            add_coef(m, card, v, 1)
+            # for o in orders:
+            #     add_coef(m, order_cons[o], v, 1) 
+            cols[(a, frozenset(orders))] = v
+        # m.writeProblem(f"rmp_k{k}_init.lp")
         return {"model": m, "cols": cols, "cov": cov,
                 "lb": lb, "ub": ub, "card": card}
 
+    # añade columna nueva ------
     def _add_column(self, pack, a, orders, units):
         key = (a, frozenset(orders))
         if key in pack["cols"]:
@@ -199,6 +177,16 @@ class Columns:
         #     add_coef(m, pack["order_cons"][o], v, 1)
         pack["cols"][key] = v
 
+    def _key_from_name(self, vname):
+        """
+        Convierte "col_71_2_39"  →  (71, frozenset({2,39}))
+        Se usa cuando borramos la variable para quitarla de pack["cols"].
+        """
+        parts   = vname.split("_")
+        aisle   = int(parts[1])
+        orders  = frozenset(int(x) for x in parts[2:])
+        return (aisle, orders)
+    
     #RMP(k) con column generation --------------------
     def Opt_cantidadPasillosFija(self, k, tlimit):
         if k not in self.rmp_cache:
@@ -208,10 +196,11 @@ class Columns:
         start = time.time(); rounds = 0
         while True:
             rem = max(0.01, tlimit - (time.time() - start))
-            m.setParam("limits/time", rem)
+            # m.setParam("limits/time", rem)
             m.optimize()
             if m.getStatus() != "optimal":
                 break
+
 
             dual_cov = [get_dual(m, pack["cov"][i]) for i in range(self.I)]
             dual_lb  = get_dual(m, pack["lb"])
@@ -219,6 +208,13 @@ class Columns:
             dual_k   = get_dual(m, pack["card"])
             # dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
             any_new = False
+
+            # for key, var in pack["cols"].items():
+            #     if m.getVal(var) < 1e-5:
+            #         self.zero_streak[key] = self.zero_streak.get(key, 0) + 1
+            #     else:
+            #         self.zero_streak[key] = 0
+
             for a in range(self.A):
                 priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
                                       self.demand, self.supply,
@@ -228,26 +224,44 @@ class Columns:
                     m.freeTransform() 
                     self._add_column(pack, a, sel, units)
                     any_new = True
-            if not any_new:   
-                break
-              
+            
+            #marcar columnas inactivas ----------
+            victims = []
+            for v in m.getVars():
+                if not v.name.startswith("col_"):
+                    continue
+                if m.getVal(v) < 0.5: 
+                    self.zero_streak[v.name] = self.zero_streak.get(v.name, 0) + 1
+                    if self.zero_streak[v.name] >= 5:
+                        victims.append(v)
+                else: 
+                    self.zero_streak[v.name] = 0
+            if victims:
+                m.freeTransform()  # vuelve a “original”
+                for v in victims:
+                    try:
+                        m.delVar(v)
+                    except:
+                        pass
+                    self.zero_streak.pop(v.name, None)
+                    pack["cols"].pop(self._key_from_name(v.name), None)
 
-            rounds += 1
-            if (time.time()-start) >= 0.8*tlimit:
+            if (not any_new) or (time.time()-start) >= 0.8*tlimit:
                 break
-        self._last_model = pack["model"]
+        self._last_model = pack["model"]        
         return self._extract(pack)
 
-    # ---------------------------------------------------------------------
     def Opt_PasillosFijos(self, pasillos, tlimit):
         """
         Reoptimiza el mejor k fijando exactamente los pasillos =1/0.
         `pasillos` es un set de índices que deben quedar en 1.
         """
         k = len(pasillos)
-        pack = self._build_rmp(k)                
+        # ---- crea un RMP nuevo desde cero -------------
+        pack = self._build_rmp(k)
         m    = pack["model"]
 
+        # fija bounds antes de transformar
         for a in range(self.A):
             var = pack["cols"].get((a, frozenset()))
             if var is None:
@@ -262,7 +276,6 @@ class Columns:
         self._last_model = pack["model"]
         return self._extract(pack)
 
-    # ---------------------------------------------------------------------
     def Opt_ExplorarCantidadPasillos(self, tlimit):
         start = time.time()
         best_val = float("-inf"); best_sol = None
@@ -289,7 +302,6 @@ class Columns:
         self.best_sol = best_sol
         return best_sol
 
-    # ---------------------------------------------------------------------
     def _extract(self, pack):
         m = pack["model"]
         if m.getStatus() != "optimal":
@@ -299,23 +311,21 @@ class Columns:
             if m.getVal(v) > 0.5 and v.name.startswith("col_"):
                 p = v.name.split("_")
                 ais.add(int(p[1]))
-                for tok in p[2:]:
-                    if tok.isdigit():
-                        ords.add(int(tok))
+                ords.update(int(x) for x in p[2:])
         return {"obj": int(m.getObjVal()), "aisles": ais, "orders": ords}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(1)
-    
+
     tlimit = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     instance = sys.argv[1]
 
     solver = Columns(instance)
     tic = time.time()
     best = solver.Opt_ExplorarCantidadPasillos(tlimit)
-    elapsed  = time.time() - tic
-    if len(sys.argv) > 3:
+    elapsed  = time.time() - tic 
+    if len(sys.argv) > 3: 
         out_file = sys.argv[3]
         with open(out_file, "w") as f:
             json.dump(best, f)
