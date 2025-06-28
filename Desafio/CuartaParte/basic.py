@@ -78,6 +78,22 @@ class Basic:
     # ------------------------------------------------------------------------
     def Opt_cantidadPasillosFija(self, k, umbral):
         model = self._model_for_K(k)
+
+        # warm-start ---------------------------
+        if self.best_sol and len(self.best_sol["aisles"]) == k:
+            sol = model.createSol()                 # solución vacía
+            for v in model.getVars():
+                name, idx = v.name.split("_")
+                idx = int(idx)
+                if name == "x":                     # variable de pasillo
+                    val = 1.0 if idx in self.best_sol["aisles"] else 0.0
+                elif name == "y":                   # variable de orden
+                    val = 1.0 if idx in self.best_sol["orders"] else 0.0
+                else:
+                    val = 0.0
+                model.setSolVal(sol, v, val)
+            model.addSol(sol, False)
+
         model.setParam("limits/time", umbral)
         model.optimize()
         return self._extract(model)
