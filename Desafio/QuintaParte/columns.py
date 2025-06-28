@@ -57,14 +57,14 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
                  demand, supply, LB, UB):
     O = len(demand)
     I = len(supply[0])
-    units_o = [sum(demand[o]) for o in range(O)]
+    units_o = [sum(demand[o]) for o in range(O)] #u_o
 
     price_o = []
     for o in range(O):
-        rc_part  = units_o[o]
-        rc_part -= sum(dual_cov[i]*demand[o][i] for i in range(I))
-        rc_part -= units_o[o]*dual_lb
-        rc_part -= units_o[o]*dual_ub
+        rc_part  = units_o[o] # + u_o
+        rc_part -= sum(dual_cov[i]*demand[o][i] for i in range(I)) #  -π_i d_oi
+        rc_part -= units_o[o]*dual_lb #  -λ u_o
+        rc_part -= units_o[o]*dual_ub #  -μ u_o
         rc_part -= dual_order[o]
         price_o.append(rc_part)
 
@@ -131,7 +131,7 @@ class Columns:
         order_cons = {
             o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
             for o in range(self.O)
-        }                # Expr constante 0
+        }
         cov   = {i: m.addCons(expr0 >= 0,            name=f"cov_{i}")
                  for i in range(self.I)}
         lb    = m.addCons(expr0 >= self.LB,          name="LB")
@@ -175,7 +175,7 @@ class Columns:
             cols[(a, frozenset(orders))] = v
         # m.writeProblem(f"rmp_k{k}_init.lp")
         return {"model": m, "cols": cols, "cov": cov,
-                "lb": lb, "ub": ub, "card": card,  "order_cons": order_cons}      #  ← añadido
+                "lb": lb, "ub": ub, "card": card,  "order_cons": order_cons}
 
     # --------------------- añade columna nueva ----------------------------
     def _add_column(self, pack, a, orders, units):
@@ -224,7 +224,7 @@ class Columns:
                     m.freeTransform() 
                     self._add_column(pack, a, sel, units)
                     any_new = True
-            if not any_new:                # ¡no queda patrón con RC>0!
+            if not any_new:
                 break
               
 
@@ -299,9 +299,6 @@ class Columns:
                 ords.update(int(x) for x in p[2:])
         return {"obj": int(m.getObjVal()), "aisles": ais, "orders": ords}
 
-# --------------------------------------------------------------------------- #
-# main
-# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("uso: python columns_part5.py input_0001.txt [tiempo_seg]")

@@ -108,23 +108,41 @@ class Basic:
             self.best_sol = sol
         return sol
     
+    def Rankear(self, k_list, best_k):
+        if best_k is None:
+            return k_list # primera iteración
+        return sorted(k_list,
+                    key=lambda kk: abs(kk - best_k))
+
     def Opt_ExplorarCantidadPasillos(self, umbral):
         start = time.time()
         remaining = lambda: umbral - (time.time() - start)
 
-        # priming loop: k = 1 .. A   (parar si no queda tiempo)
-        best_val = -1
-        for k in range(1, self.A+1):
-            if remaining() <= 0: break
+        best_sol  = None           # incumbente
+        best_val  = -float("inf")  # valor objetivo del incumbente
+
+        # lista 1..A en orden “spread” o simplemente secuencial
+        k_list = list(range(1, self.A + 1))
+
+        # ---------- bucle principal ----------
+        while k_list and remaining() > 0:
+            k = k_list.pop(0)                       # próximo k a probar
             sol = self.Opt_cantidadPasillosFija(k, remaining())
-            if sol and sol["obj"] > best_val:
-                best_val, self.best_aisles, self.best_sol = sol["obj"], sol["aisles"], sol
 
-        # exploitation: fija esos pasillos y optimiza otra vez
-        if remaining() > 0:
-            self.Opt_PasillosFijos(remaining())
+            if sol and sol["obj"] > best_val:       # mejora incumbente
+                best_sol, best_val = sol, sol["obj"]
 
-        return self.best_sol
+            # reordenar k_list según Rankear
+            if best_sol:
+                k_list = self.Rankear(k_list, len(best_sol["aisles"]))
+
+        # ---------- ajuste fino con pasillos fijos ----------
+        if best_sol and remaining() > 0:
+            self.best_aisles = best_sol["aisles"]
+            best_sol = self.Opt_PasillosFijos(remaining())
+
+        self.best_sol = best_sol
+        return best_sol
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
