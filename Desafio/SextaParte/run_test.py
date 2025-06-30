@@ -8,7 +8,7 @@ def parse_metrics(text: str):
     """
     pat = (r"METRICS\s+inst=(\S+)\s+"
            r"conss=(\d+)\s+vars=(\d+)\s+vars_rmp=(\d+)\s+"
-           r"dual=(-?\d+)\s+obj=(\d+|NA)\s+time=([0-9.]+)")
+           r"dual=(-?\d+)\s+obj=([-+]?\d*(?:\.\d+)?|NA)\s+time=([0-9.]+)")
     m = re.search(pat, text)
     if not m:
         raise ValueError("No se encontró línea METRICS en la salida")
@@ -18,7 +18,7 @@ def parse_metrics(text: str):
     nvars      = int(m.group(3))
     nvars_rmp  = int(m.group(4))
     dual_bd    = int(m.group(5))
-    obj        = None if m.group(6) == "NA" else int(m.group(6))
+    obj        = None if m.group(6) == "NA" else float(m.group(6))
     elapsed    = float(m.group(7))
     return obj, nvars, nconss, nvars_rmp, dual_bd, elapsed, inst
 

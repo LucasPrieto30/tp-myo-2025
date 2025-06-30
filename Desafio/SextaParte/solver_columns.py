@@ -33,7 +33,7 @@ def read_instance(fname):
         LB, UB = map(int, f.readline().split())
     return O, I, A, demand, supply, LB, UB
 
-def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
+def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,  dual_order, 
                  demand, supply, LB, UB):
     O = len(demand)
     I = len(supply[0])
@@ -45,7 +45,7 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
         rc_part -= sum(dual_cov[i]*demand[o][i] for i in range(I))
         rc_part -= units_o[o]*dual_lb
         rc_part -= units_o[o]*dual_ub
-        # rc_part -= dual_order[o]
+        rc_part -= dual_order[o]
         price_o.append(rc_part)
 
     knap = Model(f"pricing_{a}")
@@ -121,10 +121,10 @@ class Columns:
         m.setMaximize()
         zero  = m.addVar(lb=0, ub=0, name="zero")
         expr0 = 0 * zero    
-        # order_cons = {
-        #     o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
-        #     for o in range(self.O)
-        # }
+        order_cons = {
+            o: m.addCons(expr0 <= 1, f"order_{o}")   # 0*zero <= 1
+            for o in range(self.O)
+        }
         cov   = {i: m.addCons(expr0 >= 0,            name=f"cov_{i}")
                  for i in range(self.I)}
         lb    = m.addCons(expr0 >= self.LB,          name="LB")
@@ -176,11 +176,11 @@ class Columns:
                 add_coef(m, lb,   v, units)
                 add_coef(m, ub,   v, units)
                 add_coef(m, card, v, 1)
-                # for o in orders:
-                #     add_coef(m, order_cons[o], v, 1)
+                for o in orders:
+                    add_coef(m, order_cons[o], v, 1)
                 cols[(a, frozenset(orders))] = v
         return {"model": m, "cols": cols, "cov": cov,
-                "lb": lb, "ub": ub, "card": card}
+                "lb": lb, "ub": ub, "card": card, "order_cons": order_cons}
 
     def _add_column(self, pack, a, orders, units):
         key = (a, frozenset(orders))
@@ -195,8 +195,8 @@ class Columns:
         add_coef(m, pack["lb"],   v, units)
         add_coef(m, pack["ub"],   v, units)
         add_coef(m, pack["card"], v, 1)
-        # for o in orders:
-        #     add_coef(m, pack["order_cons"][o], v, 1)
+        for o in orders:
+            add_coef(m, pack["order_cons"][o], v, 1)
         pack["cols"][key] = v
 
     #RMP(k) con column generation --------------------
@@ -217,10 +217,10 @@ class Columns:
             dual_lb  = get_dual(m, pack["lb"])
             dual_ub  = get_dual(m, pack["ub"])
             dual_k   = get_dual(m, pack["card"])
-            # dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
+            dual_order = [get_dual(m, pack["order_cons"][o]) for o in range(self.O)]
             any_new = False
             for a in range(self.A):
-                priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
+                priced = price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
                                       self.demand, self.supply,
                                       self.LB, self.UB)
                 if priced:
@@ -257,7 +257,7 @@ class Columns:
                 m.chgVarUb(var, 1)
             else:
                 m.chgVarUb(var, 0)
-        # m.setParam("limits/time", max(tlimit, 0.1))
+        m.setParam("limits/time", max(tlimit, 0.1))
         m.optimize()
         self._last_model = pack["model"]
         return self._extract(pack)
@@ -327,5 +327,5 @@ if __name__ == "__main__":
 
     print(f"METRICS inst={os.path.basename(instance)} "
         f"conss={total_c} vars={total_v} vars_rmp={rmp_v} "
-        f"dual={int(dual_bd)} obj={best['obj'] if best else 'NA'} "
+        f"dual={int(dual_bd)} obj={best['obj'] / len(best['aisles']) if best else 'NA'} "
         f"time={elapsed:.1f}")
