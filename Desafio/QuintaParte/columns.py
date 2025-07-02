@@ -349,6 +349,8 @@ class Columns:
             return None
         
         units = sum(sum(self.demand[o]) for o in ords)
+        if units < self.LB or units > self.UB:
+            return None
         k     = len(ais) or 1
         prod  = units / k
 
