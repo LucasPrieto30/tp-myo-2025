@@ -27,6 +27,8 @@ class Basic:
         self.base_model, self.x, self.y, self.con_K = self._build_master()
         self.best_aisles = set()
         self.best_sol    = None
+        self.last_dual_bound : float = -float("inf")   # DB del modelo recién corrido
+        self.best_dual_bound : float = -float("inf")   # mejor DB global
 
     # ---------- construcción ------------------------------------------------
     def _build_master(self):
@@ -73,7 +75,7 @@ class Basic:
                   if v.name.startswith("x_") and model.getVal(v) > 0.5}
         orders = {int(v.name.split("_")[1]) for v in model.getVars()
                   if v.name.startswith("y_") and model.getVal(v) > 0.5}
-        return {"obj": int(model.getObjVal()), "aisles": aisles, "orders": orders}
+        return {"obj": int(model.getObjVal()) / len(aisles), "aisles": aisles, "orders": orders}
 
     # ------------------------------------------------------------------------
     def Opt_cantidadPasillosFija(self, k, umbral):
@@ -94,8 +96,11 @@ class Basic:
                 model.setSolVal(sol, v, val)
             model.addSol(sol, False)
 
-        model.setParam("limits/time", umbral)
+        # model.setParam("limits/time", umbral)
         model.optimize()
+        self.last_dual_bound = model.getDualbound()
+        if self.last_dual_bound > self.best_dual_bound:
+            self.best_dual_bound = self.last_dual_bound
         return self._extract(model)
 
     def Opt_PasillosFijos(self, umbral):
@@ -117,7 +122,7 @@ class Basic:
             else:
                 m.chgVarUb(var, 0.0)
 
-        m.setParam("limits/time", umbral)
+        # m.setParam("limits/time", umbral)
         m.optimize()
         sol = self._extract(m)
         if sol:
@@ -141,9 +146,8 @@ class Basic:
         k_list = list(range(1, self.A + 1))
 
         # ---------- bucle principal ----------
-        while k_list and remaining() > 0:
-            k = k_list.pop(0)                       # próximo k a probar
-            sol = self.Opt_cantidadPasillosFija(k, remaining())
+        for k in k_list:  
+            sol = self.Opt_cantidadPasillosFija(k, None)
 
             if sol and sol["obj"] > best_val:       # mejora incumbente
                 best_sol, best_val = sol, sol["obj"]
@@ -153,7 +157,7 @@ class Basic:
                 k_list = self.Rankear(k_list, len(best_sol["aisles"]))
 
         # ---------- ajuste fino con pasillos fijos ----------
-        if best_sol and remaining() > 0:
+        if best_sol:
             self.best_aisles = best_sol["aisles"]
             best_sol = self.Opt_PasillosFijos(remaining())
 
@@ -171,8 +175,8 @@ if __name__ == "__main__":
     best = basic.Opt_ExplorarCantidadPasillos(10)
     print(best)
 
-    print("\n>>> Opt_cantidadPasillosFija(k=3, umbral=5 s)")
-    print(basic.Opt_cantidadPasillosFija(3, 5))
+    print("\n>>> Opt_cantidadPasillosFija(k=10, umbral=5 s)")
+    print(basic.Opt_cantidadPasillosFija(10, 5))
 
     print("\n>>> Opt_PasillosFijos(umbral=5 s)  sobre la mejor selección previa")
     print(basic.Opt_PasillosFijos(5))

@@ -7,7 +7,7 @@ Resuelve el “wave picking” con:
   • subproblema de pricing 0-1 knapsack por pasillo
 """
 
-import sys, time
+import sys, time, math
 from pyscipopt import Model, quicksum
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +67,14 @@ def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order,
         rc_part -= units_o[o]*dual_ub #  -μ u_o
         rc_part -= dual_order[o]
         price_o.append(rc_part)
+    CAP = 1e+09
+    for o in range(O):
+        if not math.isfinite(price_o[o]):
+            price_o[o] = CAP if price_o[o] > 0 else -CAP
+        elif price_o[o] >  CAP:
+            price_o[o] =  CAP
+        elif price_o[o] < -CAP:
+            price_o[o] = -CAP
 
     knap = Model(f"pricing_{a}")
     z = {o: knap.addVar(vtype="B", obj=price_o[o]) for o in range(O)}
@@ -231,7 +239,9 @@ class Columns:
             rounds += 1
             if (time.time()-start) >= 0.8*tlimit:
                 break
-
+        # DEBUG: ola con slack (si hubiera)
+        debug_wave = self._extract_incl_slack(pack)
+        print(">> Ola con slack antes de fijar pasillos:", debug_wave)
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
@@ -286,18 +296,61 @@ class Columns:
         self.best_sol = best_sol
         return best_sol
 
-    # ---------------------------------------------------------------------
-    def _extract(self, pack):
+
+    def _extract_incl_slack(self, pack):
+        """Igual que _extract pero permite slack/dummy (para debug)."""
         m = pack["model"]
         if m.getStatus() != "optimal":
             return None
+
+        ais, ords = set(), set()
+        for v in m.getVars():
+            if v.name.startswith("col_") and m.getVal(v) > 0.5:
+                p = v.name.split("_")
+                ais.add(int(p[1]))
+                ords.update(int(x) for x in p[2:])
+
+        if not ords:
+            return None
+
+        units = sum(sum(self.demand[o]) for o in ords)
+        k     = len(ais) or 1
+        prod  = units / k
+
+        return {"obj": prod, "units": units, "aisles": ais, "orders": ords}
+
+    # ---------------------------------------------------------------------
+    def _extract(self, pack):
+        """Devuelve la ola sólo si está libre de slack/dummy."""
+        m = pack["model"]
+        if m.getStatus() != "optimal":
+            return None
+
+        #Si slack o dummy están activos, rechazamos la solución
+        for v in m.getVars():
+            if v.name.startswith(("slack", "dummy")) and m.getVal(v) > 1e-6:
+                return None                       # solución infactible real
+
         ais, ords = set(), set()
         for v in m.getVars():
             if m.getVal(v) > 0.5 and v.name.startswith("col_"):
                 p = v.name.split("_")
                 ais.add(int(p[1]))
                 ords.update(int(x) for x in p[2:])
-        return {"obj": int(m.getObjVal()), "aisles": ais, "orders": ords}
+
+        if not ords:
+            return None
+        
+        units = sum(sum(self.demand[o]) for o in ords)
+        k     = len(ais) or 1
+        prod  = units / k
+
+        return {
+            "obj":     prod,
+            "units":   units,
+            "aisles":  ais,
+            "orders":  ords,
+        }
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
