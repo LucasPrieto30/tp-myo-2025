@@ -204,14 +204,14 @@ class Columns:
         pack["cols"][key] = v
 
     # -------------------- RMP(k) con column generation --------------------
-    def Opt_cantidadPasillosFija(self, k, tlimit):
+    def Opt_cantidadPasillosFija(self, k, umbral):
         if k not in self.rmp_cache:
             self.rmp_cache[k] = self._build_rmp(k)
         pack = self.rmp_cache[k];  m = pack["model"]
 
         start = time.time(); rounds = 0
         while True:
-            rem = max(0.01, tlimit - (time.time() - start))
+            rem = max(0.01, umbral - (time.time() - start))
             m.setParam("limits/time", rem)
             m.optimize()
             if m.getStatus() != "optimal":
@@ -237,7 +237,7 @@ class Columns:
               
 
             rounds += 1
-            if (time.time()-start) >= 0.8*tlimit:
+            if (time.time()-start) >= 0.8*umbral:
                 break
         # DEBUG: ola con slack (si hubiera)
         debug_wave = self._extract_incl_slack(pack)
@@ -245,7 +245,7 @@ class Columns:
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
-    def Opt_PasillosFijos(self, pasillos, tlimit):
+    def Opt_PasillosFijos(self, pasillos, umbral):
         """
         Reoptimiza el mejor k fijando exactamente los pasillos =1/0.
         `pasillos` es un set de índices que deben quedar en 1.
@@ -254,6 +254,10 @@ class Columns:
         # ---- crea un RMP nuevo desde cero -------------
         pack = self._build_rmp(k)                 # modelo limpio
         m    = pack["model"]
+        
+        for v in m.getVars():
+            if v.name.startswith(("slack", "dummy")):
+                m.chgVarUb(v, 0.0)
 
         # fija bounds *antes* de transformar
         for a in range(self.A):
@@ -265,19 +269,19 @@ class Columns:
                 m.chgVarUb(var, 1)
             else:                       # pasillos prohibidos
                 m.chgVarUb(var, 0)
-        m.setParam("limits/time", max(tlimit, 0.1))
+        m.setParam("limits/time", max(umbral, 0.1))
         m.optimize()
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
-    def Opt_ExplorarCantidadPasillos(self, tlimit):
+    def Opt_ExplorarCantidadPasillos(self, umbral):
         start = time.time()
         best_val = float("-inf"); best_sol = None
         k_list = list(range(1, self.A+1))
 
-        while k_list and (time.time()-start) < tlimit:
+        while k_list and (time.time()-start) < umbral:
             k = k_list.pop(0)
-            rem = tlimit - (time.time()-start)
+            rem = umbral - (time.time()-start)
             sol = self.Opt_cantidadPasillosFija(k, rem)
 
             if sol and (best_sol is None or sol["obj"] > best_val or
@@ -286,16 +290,19 @@ class Columns:
                 best_val = sol["obj"]; best_sol = sol
 
             if best_sol:
-                k_list.sort(key=lambda kk: abs(kk - len(best_sol["aisles"])))
+                k_list = self._rankear(k_list, best_sol["aisles"])
 
         if best_sol:
-            rem = tlimit - (time.time()-start)
+            rem = umbral - (time.time()-start)
             rem = max(rem, 0.1)
             best_sol = self.Opt_PasillosFijos(best_sol["aisles"], rem)
 
         self.best_sol = best_sol
         return best_sol
 
+    def _rankear(self, k_list, best_aisles):
+        """Ordena k_list según lo ‘prometedor’ que es cada k."""
+        return sorted(k_list, key=lambda kk: abs(kk - len(best_aisles)))
 
     def _extract_incl_slack(self, pack):
         """Igual que _extract pero permite slack/dummy (para debug)."""
@@ -357,10 +364,10 @@ if __name__ == "__main__":
         print("uso: python columns_part5.py input_0001.txt [tiempo_seg]")
         sys.exit(1)
 
-    tlimit = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    umbral = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     instance = sys.argv[1]
 
     solver = Columns(instance)
-    best = solver.Opt_ExplorarCantidadPasillos(tlimit)
+    best = solver.Opt_ExplorarCantidadPasillos(umbral)
     print("\n== Mejor ola ==")
     print(best)
