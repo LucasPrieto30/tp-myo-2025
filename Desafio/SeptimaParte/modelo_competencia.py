@@ -1,43 +1,43 @@
 #!/usr/bin/env python3
 """
-Modelo de competencia (Séptima parte)
-------------------------------------
-• Column Generation + pequeñas extensiones para competir:
-   – Semillas (columnas iniciales) algo mejores.
-   – Rankear(k) con política tipo UCB.
-   – Purga de columnas inactivas durante ≥ 3 iteraciones.
+Parte 7 – Modelo de competencia
+===============================
 
-El archivo es *auto‑contenible*: no depende de ningún otro módulo.
+Branch-and-Price *minimalista*:
+
+  • Semillas greedy densidad-unidades.
+  • Pricer que resuelve un knapsack 0-1 por pasillo y añade columnas.
+  • Variables binarias  ⇒  SCIP hace branch-and-bound por defecto.
+  • Rankear(k) mediante puntuación UCB.
+  • Purga de columnas inactivas ≥ PRUNE_HORIZON rondas.
 """
 
-import sys, os, time, math
+import sys, time, math
 from collections import defaultdict
-from typing import Dict, List, Tuple, Set, FrozenSet, Optional
+from typing import List, Dict, Tuple, Set
 
-from pyscipopt import Model, quicksum  # type: ignore
+from pyscipopt import Model, Pricer, quicksum, SCIP_RESULT
 
-##############################################################################
-# utilidades genéricas                                                       #
-##############################################################################
-
+# ────────────────────────────────────────────────────────────────────
+#  Utilidades
+# ────────────────────────────────────────────────────────────────────
 def add_coef(model: Model, cons, var, coef):
-    """Compatibilidad SCIP 7/8 (PySCIPOpt ≥ 4)."""
     if hasattr(model, "addCoefLinear"):
         model.addCoefLinear(cons, var, coef)
     else:
         cons.addCoef(var, coef)
 
 def get_dual(model: Model, cons):
-    """Obtiene el valor dual robusto a presolve."""
     try:
-        return model.getDualsolLinear(cons) if hasattr(model, "getDualsolLinear") else model.getDual(cons)
+        return (model.getDualsolLinear(cons)
+                if hasattr(model, "getDualsolLinear")
+                else model.getDual(cons))
     except Exception:
-        return 0.0               # fila eliminada por presolve
+        return 0.0           # restricción eliminada en presolve
 
-##############################################################################
-# lectura de instancia                                                       #
-##############################################################################
-
+# ────────────────────────────────────────────────────────────────────
+#  Lectura de instancia
+# ────────────────────────────────────────────────────────────────────
 def read_instance(fname: str):
     with open(fname) as f:
         O, I, A = map(int, f.readline().split())
@@ -56,349 +56,268 @@ def read_instance(fname: str):
         LB, UB = map(int, f.readline().split())
     return O, I, A, demand, supply, LB, UB
 
-##############################################################################
-# pricing – knapsack 0‑1                                                     #
-##############################################################################
-
-def price_column(a: int, dual_cov: List[float], dual_lb: float, dual_ub: float,
-                 dual_k: float, dual_order: List[float],
+# ────────────────────────────────────────────────────────────────────
+#  Sub-problema de pricing (knapsack 0-1 por pasillo)
+# ────────────────────────────────────────────────────────────────────
+def price_column(a: int, dual_cov: List[float],
+                 dual_lb: float, dual_ub: float,
+                 dual_k: float, dual_ord: List[float],
                  demand: List[List[int]], supply: List[List[int]],
-                 LB: int, UB: int, debug: bool=False):
-    """Resuelve el sub‑problema para pasillo *a*.
-       Devuelve (ordersSel, units, redCost) o None si rc≤0."""
-    O = len(demand)
-    I = len(supply[0])
-    units_o = [sum(demand[o]) for o in range(O)]
+                 LB: int, UB: int):
+    O = len(demand); I = len(supply[0])
+    u_o = [sum(demand[o]) for o in range(O)]
 
-    price_o: List[float] = []
+    rc_obj = []
     for o in range(O):
-        rc  = units_o[o]                              # + u_o
+        rc  = u_o[o]
         rc -= sum(dual_cov[i]*demand[o][i] for i in range(I))
-        rc -= units_o[o]*dual_lb                     # ‑ λ u_o
-        rc -= units_o[o]*dual_ub                     # ‑ μ u_o
-        rc -= dual_order[o]
-        price_o.append(rc)
+        rc -= u_o[o]*(dual_lb + dual_ub)
+        rc -= dual_ord[o]
+        rc_obj.append(rc)
 
     knap = Model(f"pricing_{a}")
-    z = {o: knap.addVar(vtype="B", obj=price_o[o]) for o in range(O)}
+    z = {o: knap.addVar(vtype="B", obj=rc_obj[o]) for o in range(O)}
 
     for i in range(I):
-        knap.addCons(quicksum(demand[o][i]*z[o] for o in range(O)) <= supply[a][i])
-    tot = quicksum(units_o[o]*z[o] for o in range(O))
+        knap.addCons(quicksum(demand[o][i]*z[o] for o in range(O))
+                     <= supply[a][i])
+    tot = quicksum(u_o[o]*z[o] for o in range(O))
     knap.addCons(tot >= LB)
     knap.addCons(tot <= UB)
 
-    try:
-        knap.hideOutput()
-    except AttributeError:
-        knap.setParam("display/verblevel", 0)
-
+    knap.hideOutput()
     knap.optimize()
     if knap.getStatus() != "optimal":
         return None
 
-    rc = knap.getObjVal() - dual_k
-    if rc <= 1e-6:
+    red_cost = knap.getObjVal() - dual_k
+    if red_cost <= 1e-6:
         return None
 
     sel = [o for o in z if knap.getVal(z[o]) > 0.5]
-    units = sum(units_o[o] for o in sel)
-    if debug:
-        print(f"[pricing] a={a:3d} rc={rc:6.2f} units={units:3d} sel={sel}")
-    return sel, units, rc
+    units = sum(u_o[o] for o in sel)
+    return sel, units, red_cost
 
-##############################################################################
-# clase principal                                                            #
-##############################################################################
+# ────────────────────────────────────────────────────────────────────
+#  Pricer
+# ────────────────────────────────────────────────────────────────────
+class WavePricer(Pricer):
+    def __init__(self, solver, pack):
+        super().__init__()
+        self.solver = solver   # referencia al Solver principal
+        self.pack   = pack     # dicc. con modelo y restricciones
 
+    # SCIP llamará a esto mientras exista costo reducido negativo
+    def pricerredcost(self):
+        m       = self.model
+        pack    = self.pack
+        added   = False
+
+        dual_cov   = [get_dual(m, pack["cov"][i])   for i in range(self.solver.I)]
+        dual_lb    = get_dual(m, pack["lb"])
+        dual_ub    = get_dual(m, pack["ub"])
+        dual_k     = get_dual(m, pack["card"])
+        dual_order = [get_dual(m, pack["order"][o]) for o in range(self.solver.O)]
+
+        for a in range(self.solver.A):
+            res = price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
+                               dual_order,
+                               self.solver.demand, self.solver.supply,
+                               self.solver.LB, self.solver.UB)
+            if not res:
+                continue
+            orders, units, _ = res
+            key = (a, frozenset(orders))
+            if key in pack["cols"]:
+                continue                      # ya existe
+
+            # ── crear la variable en el nodo actual ─────────────────────────
+            name = f"col_{a}_" + "_".join(map(str, orders))
+            var  = m.addVar(vtype="B", obj=units, name=name)
+
+            for i in range(self.solver.I):
+                q = sum(self.solver.demand[o][i] for o in orders)
+                if q:
+                    add_coef(m, pack["cov"][i], var, q)
+            add_coef(m, pack["lb"]  , var, units)
+            add_coef(m, pack["ub"]  , var, units)
+            add_coef(m, pack["card"], var, 1)
+            for o in orders:
+                add_coef(m, pack["order"][o], var, 1)
+
+            m.addPricedVar(var, 1.0)          # coste de columna ya en obj
+            pack["cols"][key] = var
+            added = True
+
+        return {"result": SCIP_RESULT.SUCCESS if added
+                          else SCIP_RESULT.DIDNOTFIND}
+
+    # no usamos branching dinámico → pricerfarkas no necesario
+    def pricerfarkas(self):
+        return {"result": SCIP_RESULT.DIDNOTRUN}
+
+# ────────────────────────────────────────────────────────────────────
+#  Solver principal
+# ────────────────────────────────────────────────────────────────────
 class Solver:
-
-    # purga si variable 0 en las últimas PRUNE_HORIZON iteraciones
     PRUNE_HORIZON = 3
-    PRUNE_WARMUP  = 5      # no podar antes de la 5ª ronda  
+    PRUNE_WARMUP  = 5
+
     def __init__(self, fname: str):
         (self.O, self.I, self.A,
          self.demand, self.supply,
          self.LB, self.UB) = read_instance(fname)
-        print("sdfds")
-        self.rmp_cache: Dict[int, dict] = {}
-        self.k_stats   : Dict[int, dict] = {
-            k: {"best": float("-inf"), "trials": 0}
-            for k in range(1, self.A+1)
-        }
-        self.last_seen: Dict[str, int] = defaultdict(int)  # <<–– CAMBIO AQUÍ (key=str)
-        self.best_sol  = None
 
-    # ------------------------------------------------------------------
-    # semilla greed‑max (pero 2‑fase: primero densidad, luego unidades)
-    # ------------------------------------------------------------------
-    def _greedy_pattern(self, a: int):
-        units_o = [(o, sum(self.demand[o])) for o in range(self.O)]
-        # orden por densidad (u/|items|) para usar bien capacidad de pasillo
-        dens   = lambda t: t[1] / (sum(1 for q in self.demand[t[0]] if q>0) or 1)
-        units_o.sort(key=lambda t: (-dens(t), -t[1]))
+        self.rmp_cache : Dict[int, dict] = {}
+        self.last_seen : Dict[str,int]   = defaultdict(int)
+        self.k_stats   : Dict[int,dict]  = {k:{"best":-1e18,"trials":0}
+                                            for k in range(1,self.A+1)}
 
-        cap = self.supply[a][:]
-        sel: List[int] = []
-        tot = 0
-        for o, u in units_o:
-            if tot + u > self.UB:
-                continue
-            if all(self.demand[o][i] <= cap[i] for i in range(self.I)):
-                sel.append(o); tot += u
-                for i in range(self.I):
-                    cap[i] -= self.demand[o][i]
-            if tot == self.UB:
-                break
+    # ---------------------------------------------------------------
+    def _greedy_pattern(self, a: int) -> Tuple[List[int], int]:
+        units = [(o, sum(self.demand[o])) for o in range(self.O)]
+        dens  = lambda t: t[1] / (sum(1 for q in self.demand[t[0]] if q>0) or 1)
+        units.sort(key=lambda t: (-dens(t), -t[1]))
+
+        cap = self.supply[a][:]; sel=[]; tot=0
+        for o,u in units:
+            if tot+u>self.UB: continue
+            if all(self.demand[o][i]<=cap[i] for i in range(self.I)):
+                sel.append(o); tot+=u
+                for i in range(self.I): cap[i]-=self.demand[o][i]
+            if tot==self.UB: break
         return sel, tot
 
-    # ------------------------------------------------------------------
-    # RMP(k) inicial
-    # ------------------------------------------------------------------
-    def _build_rmp(self, k: int):
-        m = Model(f"RMP_k{k}")
-        try:
-            m.hideOutput()
-        except AttributeError:
-            m.setParam("display/verblevel", 0)
-        m.setMaximize()
+    # ---------------------------------------------------------------
+    def _build_master(self, k:int):
+        m = Model(f"RMP_k{k}"); m.hideOutput(); m.setMaximize()
+        zero = m.addVar(lb=0,ub=0,name="zero"); expr0 = 0*zero
 
-        zero  = m.addVar(lb=0, ub=0, name="zero")
-        expr0 = 0*zero
+        order = {o:m.addCons(expr0<=1,f"ord_{o}") for o in range(self.O)}
+        cov   = {i:m.addCons(expr0>=0,f"cov_{i}") for i in range(self.I)}
+        lb    = m.addCons(expr0>=self.LB,"LB")
+        ub    = m.addCons(expr0<=self.UB,"UB")
+        card  = m.addCons(expr0==k, "card_k")
 
-        order_c = {o: m.addCons(expr0 <= 1, f"order_{o}") for o in range(self.O)}
-        cov_c   = {i: m.addCons(expr0 >= 0, f"cov_{i}")    for i in range(self.I)}
-        lb_c    = m.addCons(expr0 >= self.LB,  "LB")
-        ub_c    = m.addCons(expr0 <= self.UB,  "UB")
-        k_c     = m.addCons(expr0 == k,        "card_k")
+        cols={}
 
-        cols = {}
+        # dummy y slack
+        d = m.addVar(vtype="B",obj=-1e6,name="dummy")
+        for cons in (lb,ub): add_coef(m,cons,d,self.LB)
+        add_coef(m,card,d,1); cols[("dummy",frozenset())]=d
 
-        # dummy y slack
-        dummy = m.addVar(vtype="B", obj=-1e6, name="dummy")
-        add_coef(m, lb_c, dummy, self.LB)
-        add_coef(m, ub_c, dummy, self.LB)
-        add_coef(m, k_c , dummy, 1)
-        cols[("dummy", frozenset())] = dummy
+        s = m.addVar(vtype="B",obj=-1e-3,name="slack")
+        for cons in (lb,ub): add_coef(m,cons,s,self.LB)
+        cols[("slack",frozenset())]=s
 
-        slack = m.addVar(vtype="B", obj=-1e-3, name="slack")
-        add_coef(m, lb_c, slack, self.LB)
-        add_coef(m, ub_c, slack, self.LB)
-        cols[("slack", frozenset())] = slack
-
-        # una semilla por pasillo
         for a in range(self.A):
-            orders, units = self._greedy_pattern(a)
+            orders,units = self._greedy_pattern(a)
             if not orders:
-                v = m.addVar(vtype="B", obj=0, name=f"col_{a}_0")
-                add_coef(m, k_c, v, 1)
-                cols[(a, frozenset())] = v
-                continue
-            vname = f"col_{a}_" + "_".join(map(str, orders))
-            v = m.addVar(vtype="B", obj=units, name=vname)
+                v=m.addVar(vtype="B",obj=0,name=f"col_{a}_0")
+                add_coef(m,card,v,1); cols[(a,frozenset())]=v; continue
+            name=f"col_{a}_"+"_".join(map(str,orders))
+            v=m.addVar(vtype="B",obj=units,name=name)
             for i in range(self.I):
-                q = sum(self.demand[o][i] for o in orders)
-                if q:
-                    add_coef(m, cov_c[i], v, q)
-            add_coef(m, lb_c, v, units)
-            add_coef(m, ub_c, v, units)
-            add_coef(m, k_c , v, 1)
-            for o in orders:
-                add_coef(m, order_c[o], v, 1)
-            cols[(a, frozenset(orders))] = v
+                q=sum(self.demand[o][i] for o in orders)
+                if q: add_coef(m,cov[i],v,q)
+            for cons in (lb,ub): add_coef(m,cons,v,units)
+            add_coef(m,card,v,1)
+            for o in orders: add_coef(m,order[o],v,1)
+            cols[(a,frozenset(orders))]=v
 
-        return {
-            "model": m,
-            "cols" : cols,
-            "cov"  : cov_c,
-            "lb"   : lb_c,
-            "ub"   : ub_c,
-            "card" : k_c,
-            "order": order_c,
-        }
+        pack={"model":m,"cov":cov,"lb":lb,"ub":ub,"card":card,"order":order,"cols":cols}
+        pricer=WavePricer(self,pack)
+        m.includePricer(pricer,"WavePricer","",1,False)
 
-    # ------------------------------------------------------------------
-    def _add_column(self, pack: dict, a: int, orders: List[int], units: int):
-        key = (a, frozenset(orders))
-        if key in pack["cols"]:
-            return
-        m = pack["model"]
-        v = m.addVar(vtype="B", obj=units, name=f"col_{a}_"+"_".join(map(str,orders)))
-        for i in range(self.I):
-            q = sum(self.demand[o][i] for o in orders)
-            if q:
-                add_coef(m, pack["cov"][i], v, q)
-        add_coef(m, pack["lb"],   v, units)
-        add_coef(m, pack["ub"],   v, units)
-        add_coef(m, pack["card"], v, 1)
-        for o in orders:
-            add_coef(m, pack["order"][o], v, 1)
-        pack["cols"][key] = v
+        return pack
 
-    # ------------------------------------------------------------------
-    # lógica de purga & timestamp
-    # ------------------------------------------------------------------
-    def _after_opt(self, pack: dict, current_round: int):
-        """
-        ▸ Registra cuántas rondas lleva cada columna sin estar en la base
-        ▸ Poda las que superen PRUNE_HORIZON, pero solo después de PRUNE_WARMUP
-        """
-        m: Model = pack["model"]
+    # ---------------------------------------------------------------
+    def _purge(self, pack, round_):
+        if round_<self.PRUNE_WARMUP: return
+        m=pack["model"]; gone=[]
+        for v in m.getVars():
+            if not v.name.startswith("col_"): continue
+            key=v.name
+            if m.getVal(v)<1e-6: self.last_seen[key]+=1
+            else: self.last_seen[key]=0
+            if self.last_seen[key]>=self.PRUNE_HORIZON: gone.append(v)
+        if gone:
+            m.freeTransform()
+            for v in gone:
+                m.delVar(v); self.last_seen.pop(v.name,None)
 
-        # 1) Actualizar contadores -------------------------------------------
-        for var in m.getVars():
-            if not var.name.startswith("col_"):
-                continue                     # no es una columna de patrón
-
-            key = var.name                  # String → hashable
-            if m.getVal(var) < 1e-6:        # inactiva en esta ronda
-                self.last_seen[key] = self.last_seen.get(key, 0) + 1
-            else:                           # utilizada (valor 1)
-                self.last_seen[key] = 0
-
-        # 2) Si aún estamos en warm-up, salir sin podar ----------------------
-        if current_round < self.PRUNE_WARMUP:
-            return
-
-        # 3) Recoger variables que superan el umbral -------------------------
-        to_delete = []
-        for var in m.getVars():
-            key = var.name
-            if key.startswith("col_") and self.last_seen.get(key, 0) >= self.PRUNE_HORIZON:
-                to_delete.append(var)
-
-        # 4) Purgar en bloque -------------------------------------------------
-        if to_delete:
-            m.freeTransform()               # una única llamada basta
-            for var in to_delete:
-                m.delVar(var)
-                self.last_seen.pop(var.name, None)   # limpiar contador
-
-    # ------------------------------------------------------------------
-    def _solve_lp_for_k(self, k: int, tlim: float, debug: bool=False):
-        if k not in self.rmp_cache:
-            self.rmp_cache[k] = self._build_rmp(k)
-        pack = self.rmp_cache[k]
-        m: Model = pack["model"]
-        rounds = 0
-        start = time.time()
+    # ---------------------------------------------------------------
+    def solve_for_k(self,k:int,tlim:float):
+        pack=self.rmp_cache.setdefault(k,self._build_master(k))
+        m=pack["model"]; start=time.time(); rounds=0
         while True:
-            rounds += 1
-            rem = max(0.01, tlim - (time.time()-start))
-            m.setParam("limits/time", rem)
+            rounds+=1
+            m.setParam("limits/time",max(0.01,tlim-(time.time()-start)))
+            ncols_before = len(pack["cols"])
             m.optimize()
-            if m.getStatus() != "optimal":
+            if m.getStatus()!="optimal": break
+            self._purge(pack,rounds)
+            ncols_after = len(pack["cols"])
+            if ncols_after == ncols_before:          #  ⇐  nada nuevo → convergió
                 break
-            self._after_opt(pack, rounds)      # <<– purga
-
-            dual_cov   = [get_dual(m, pack["cov"][i]) for i in range(self.I)]
-            dual_lb    = get_dual(m, pack["lb"])
-            dual_ub    = get_dual(m, pack["ub"])
-            dual_k     = get_dual(m, pack["card"])
-            dual_order = [get_dual(m, pack["order"][o]) for o in range(self.O)]
-
-            any_new = False
-            for a in range(self.A):
-                res = price_column(a, dual_cov, dual_lb, dual_ub, dual_k,
-                                   dual_order,
-                                   self.demand, self.supply, self.LB, self.UB,
-                                   debug=debug)
-                if res:
-                    sel, units, _ = res
-                    m.freeTransform()
-                    self._add_column(pack, a, sel, units)
-                    any_new = True
-            if not any_new:
-                break
-
-            if (time.time()-start) >= 0.9*tlim:
-                break
-
+            # SCIP ya llamó al pricer; si no añadió nada, corte
+            if time.time()-start>0.9*tlim: break
         return self._extract(pack)
 
-    # ------------------------------------------------------------------
-    def _ucb_score(self, k: int):
-        s = self.k_stats[k]
-        if s["trials"] == 0:
-            return float("inf")
-        C = 0.5
-        total = sum(t["trials"] for t in self.k_stats.values()) + 1
-        return s["best"] + C*math.sqrt(math.log(total)/s["trials"])
+    # ---------------------------------------------------------------
+    # pura línea para def
+    def _ucb(self, k):
+        s=self.k_stats[k]
+        if s["trials"]==0: return float("inf")
+        C=0.5; tot=sum(d["trials"] for d in self.k_stats.values())+1
+        return s["best"]+C*math.sqrt(math.log(tot)/s["trials"])
 
-    # ------------------------------------------------------------------
-    def solve(self, tlim: float):
-        start = time.time()
-        best_val = float("-inf"); best_sol = None
-        k_list = list(range(1, self.A+1))
+    # ---------------------------------------------------------------
+    def solve(self,tlimit:float):
+        start=time.time(); best=None; best_val=-1e18
+        k_list=list(range(1,self.A+1))
+        while k_list and time.time()-start<tlimit:
+            k_list.sort(key=self._ucb,reverse=True)
+            k=k_list.pop(0)
+            remaining=tlimit-(time.time()-start)
+            sol=self.solve_for_k(k,remaining)
+            st=self.k_stats[k]; st["trials"]+=1
+            if sol: st["best"]=max(st["best"],sol["obj"])
+            if sol and sol["obj"]>best_val:
+                best_val=sol["obj"]; best=sol
+        return best
 
-        while k_list and (time.time()-start) < tlim:
-            # selección según ranking/UCB
-            k_list.sort(key=self._ucb_score, reverse=True)
-            k = k_list.pop(0)
-            print(k_list)
-            remaining = tlim - (time.time()-start)
-            sol = self._solve_lp_for_k(k, remaining)
-
-            st = self.k_stats[k]
-            st["trials"] += 1
-            if sol:
-                st["best"] = max(st["best"], sol["obj"])
-
-            if sol and (best_sol is None or sol["obj"] > best_val or
-                         (sol["obj"] == best_val and len(sol["aisles"]) < len(best_sol["aisles"]))):
-                best_val = sol["obj"]; best_sol = sol
-
-        self.best_sol = best_sol
-        print(best_sol)
-        return best_sol
-
-    # ------------------------------------------------------------------
-    def _extract(self, pack: dict):
-        m: Model = pack["model"]
-        if m.getStatus() != "optimal":
-            return None
-        # si slack/dummy activos ⇒ infactible real
+    # ---------------------------------------------------------------
+    def _extract(self,pack):
+        m=pack["model"]
+        if m.getStatus()!="optimal": return None
         for v in m.getVars():
-            if v.name.startswith(("slack","dummy")) and m.getVal(v) > 1e-6:
+            if v.name.startswith(("dummy","slack")) and m.getVal(v)>1e-6:
                 return None
-
-        ais: Set[int] = set(); ords: Set[int] = set()
+        ais=set(); ords=set()
         for v in m.getVars():
-            if v.name.startswith("col_") and m.getVal(v) > 0.5:
-                parts = v.name.split("_")
-                ais.add(int(parts[1]))
+            if v.name.startswith("col_") and m.getVal(v)>0.5:
+                parts=v.name.split("_"); ais.add(int(parts[1]))
                 ords.update(int(x) for x in parts[2:])
-        if not ords:
-            return None
-        units = sum(sum(self.demand[o]) for o in ords)
-        if units < self.LB or units > self.UB:
-            return None
-        k = len(ais) or 1
-        return {
-            "obj": units/k,
-            "units": units,
-            "aisles": sorted(ais),
-            "orders": sorted(ords),
-        }
+        if not ords: return None
+        units=sum(sum(self.demand[o]) for o in ords)
+        if units<self.LB or units>self.UB: return None
+        return {"obj":units/len(ais),"units":units,
+                "aisles":sorted(ais),"orders":sorted(ords)}
 
-##############################################################################
-# main                                                                       #
-##############################################################################
-
-def main(argv: List[str]):
-    print("gola")
-    if len(argv) < 2:
-        print("uso: python modelo_competencia.py <input_file> [tiempo_seg]")
+# ────────────────────────────────────────────────────────────────────
+#  Main
+# ────────────────────────────────────────────────────────────────────
+def main(argv):
+    if len(argv)<2:
+        print("Uso: python modelo_competencia.py instancia.txt [tiempo_seg]")
         sys.exit(1)
-    inp = argv[1]
-    tlim = float(argv[2]) if len(argv) > 2 else 300
-    print(tlim)
-    solver = Solver(inp)
-    print("asa")
+    inst = argv[1]
+    tlim = float(argv[2]) if len(argv)>2 else 300
+    solver=Solver(inst)
     best = solver.solve(tlim)
-
     print("\n== Mejor ola ==")
     print(best)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main(sys.argv)

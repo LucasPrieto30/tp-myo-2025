@@ -27,18 +27,17 @@ class Basic:
         self.base_model, self.x, self.y, self.con_K = self._build_master()
         self.best_aisles = set()
         self.best_sol    = None
-        self.last_dual_bound : float = -float("inf")   # DB del modelo recién corrido
-        self.best_dual_bound : float = -float("inf")   # mejor DB global
+        self.last_dual_bound : float = -float("inf") 
+        self.best_dual_bound : float = -float("inf")
 
-    # ---------- construcción ------------------------------------------------
     def _build_master(self):
         m = Model("Desafio_full")
         # x_a  (pasillo)    y_o (orden)
         x = {a: m.addVar(vtype="B", name=f"x_{a}") for a in range(self.A)}
         y = {o: m.addVar(vtype="B", name=f"y_{o}") for o in range(self.O)}
 
-        # one container-type constraint: Σ x_a == K  -> RHS cambiará
-        con_K = m.addCons(quicksum(x.values()) == 1, name="EqK")  # se cambia RHS
+        # one container-type constraint: Σ x_a == K
+        con_K = m.addCons(quicksum(x.values()) == 1, name="EqK")
         # cobertura
         for i in range(self.I):
             m.addCons(quicksum(self.demand[o][i]*y[o] for o in y) <=
@@ -56,18 +55,16 @@ class Basic:
         Devuelve un modelo con RHS(K) sin crear todo de nuevo si la versión
         de PySCIPOpt lo permite; de lo contrario crea uno nuevo.
         """
-        try:                           # SCIP ≥ 7  / PySCIPOpt ≥ 4.3
+        try:
             clone = self.base_model.copyOrig()
-            # recupera el constraint con el mismo nombre
             con_K = clone.getCons("EqK")
             clone.chgRhs(con_K, K)
             return clone
         except AttributeError:
-            # fallback → construimos un modelo nuevo
             clone, _, _, con_K = self._build_master()
             clone.chgRhs(con_K, K)
             return clone
-    # ------------- extract -------------------------------------------------
+
     def _extract(self, model):
         if model.getStatus() != "optimal":
             return None
@@ -77,11 +74,9 @@ class Basic:
                   if v.name.startswith("y_") and model.getVal(v) > 0.5}
         return {"obj": int(model.getObjVal()) / len(aisles), "aisles": aisles, "orders": orders}
 
-    # ------------------------------------------------------------------------
+
     def Opt_cantidadPasillosFija(self, k, umbral):
         model = self._model_for_K(k)
-
-        # warm-start ---------------------------
         if self.best_sol and len(self.best_sol["aisles"]) == k:
             sol = model.createSol()                 # solución vacía
             for v in model.getVars():
@@ -96,7 +91,7 @@ class Basic:
                 model.setSolVal(sol, v, val)
             model.addSol(sol, False)
 
-        # model.setParam("limits/time", umbral)
+        model.setParam("limits/time", 60)
         model.optimize()
         self.last_dual_bound = model.getDualbound()
         if self.last_dual_bound > self.best_dual_bound:
@@ -110,7 +105,6 @@ class Basic:
         k = len(self.best_aisles)
         m  = self._model_for_K(k)
 
-        # ---- construir diccionario índice→variable ------------------------
         xvars = {int(v.name.split("_")[1]): v
                  for v in m.getVars() if v.name.startswith("x_")}
 
@@ -122,7 +116,7 @@ class Basic:
             else:
                 m.chgVarUb(var, 0.0)
 
-        # m.setParam("limits/time", umbral)
+        m.setParam("limits/time", umbral)
         m.optimize()
         sol = self._extract(m)
         if sol:
@@ -131,7 +125,7 @@ class Basic:
     
     def Rankear(self, k_list, best_k):
         if best_k is None:
-            return k_list # primera iteración
+            return k_list
         return sorted(k_list,
                     key=lambda kk: abs(kk - best_k))
 
@@ -139,24 +133,21 @@ class Basic:
         start = time.time()
         remaining = lambda: umbral - (time.time() - start)
 
-        best_sol  = None           # incumbente
-        best_val  = -float("inf")  # valor objetivo del incumbente
+        best_sol  = None
+        best_val  = -float("inf")
 
-        # lista 1..A en orden “spread” o simplemente secuencial
+        
         k_list = list(range(1, self.A + 1))
 
-        # ---------- bucle principal ----------
         for k in k_list:  
             sol = self.Opt_cantidadPasillosFija(k, None)
 
-            if sol and sol["obj"] > best_val:       # mejora incumbente
+            if sol and sol["obj"] > best_val:
                 best_sol, best_val = sol, sol["obj"]
 
-            # reordenar k_list según Rankear
             if best_sol:
                 k_list = self.Rankear(k_list, len(best_sol["aisles"]))
 
-        # ---------- ajuste fino con pasillos fijos ----------
         if best_sol:
             self.best_aisles = best_sol["aisles"]
             best_sol = self.Opt_PasillosFijos(remaining())
@@ -172,11 +163,11 @@ if __name__ == "__main__":
     basic = Basic(sys.argv[1])
 
     print(">>> Opt_ExplorarCantidadPasillos  (umbral = 10 s)")
-    best = basic.Opt_ExplorarCantidadPasillos(10)
+    best = basic.Opt_ExplorarCantidadPasillos(60)
     print(best)
 
     print("\n>>> Opt_cantidadPasillosFija(k=10, umbral=5 s)")
-    print(basic.Opt_cantidadPasillosFija(10, 5))
+    print(basic.Opt_cantidadPasillosFija(10, 60))
 
     print("\n>>> Opt_PasillosFijos(umbral=5 s)  sobre la mejor selección previa")
-    print(basic.Opt_PasillosFijos(5))
+    print(basic.Opt_PasillosFijos(60))

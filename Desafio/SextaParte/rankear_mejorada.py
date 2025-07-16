@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-"""
-Parte 5 - Column Generation puro (patrones pasillo-pedidos)
------------------------------------------------------------
-Resuelve el “wave picking” con:
-  • RMP(k)  - columnas = (pasillo, subconjunto de órdenes)
-  • subproblema de pricing 0-1 knapsack por pasillo
-"""
-
-import sys, time, math
+import sys, time, os, json, math
 from pyscipopt import Model, quicksum
 
 def add_coef(model, cons, var, coef):
@@ -23,6 +14,7 @@ def get_dual(model, cons):
                 else model.getDual(cons))
     except Exception:
         return 0.0
+
 
 def read_instance(fname):
     with open(fname) as f:
@@ -43,7 +35,7 @@ def read_instance(fname):
     return O, I, A, demand, supply, LB, UB
 
 
-# pricing: knapsack 0-1
+# pricing
 def price_column(a, dual_cov, dual_lb, dual_ub, dual_k, dual_order, 
                  demand, supply, LB, UB):
     O = len(demand)
@@ -97,10 +89,10 @@ class Columns:
         (self.O, self.I, self.A,
          self.demand, self.supply,
          self.LB, self.UB) = read_instance(fname)
-        self.rmp_cache = {} # un modelo por valor de k
+        self.rmp_cache = {}
         self.best_sol  = None
+        self.k_stats = {kk: {"trials": 0, "best": float("-inf")} for kk in range(1, self.A+1)}
 
-    # ---------------- patrón greed max por pasillo -------------------------
     def _greedy_pattern(self, a):
         units_o = [(o, sum(self.demand[o])) for o in range(self.O)]
         units_o.sort(key=lambda t: -t[1])
@@ -117,8 +109,13 @@ class Columns:
                 break
         return sel, tot
 
+
     def _build_rmp(self, k):
         m = Model(f"RMP_k{k}")
+        try:
+            m.hideOutput()
+        except AttributeError:
+            m.setParam("display/verblevel", 0)
         m.setMaximize()
         zero  = m.addVar(lb=0, ub=0, name="zero")
         expr0 = 0 * zero    
@@ -134,13 +131,13 @@ class Columns:
 
         cols = {}
 
-        dummy = m.addVar(vtype="C", lb=0, ub=1, obj=-1e6, name="dummy")
+        dummy = m.addVar(vtype="B", obj=-1e6, name="dummy")
         add_coef(m, lb,   dummy, self.LB)
         add_coef(m, ub,   dummy, self.LB)
         add_coef(m, card, dummy, 1)
         cols[("dummy", frozenset())] = dummy
 
-        slack = m.addVar(vtype="C", lb=0, ub=1, obj=-1e-3, name="slack")
+        slack = m.addVar(vtype="B", obj=-1e-3, name="slack")
         add_coef(m, lb,  slack, self.LB)
         add_coef(m, ub,  slack, self.LB)
         cols[("slack", frozenset())] = slack
@@ -148,13 +145,13 @@ class Columns:
         for a in range(self.A):
             orders, units = self._greedy_pattern(a)
             if not orders:
-                v = m.addVar(vtype="C", lb=0, ub=1, obj=0, name=f"col_{a}_0")
+                v = m.addVar(vtype="B", obj=0, name=f"col_{a}_0")
                 add_coef(m, card, v, 1)
                 cols[(a, frozenset())] = v
                 continue
 
             vname = f"col_{a}_" + "_".join(map(str, orders))
-            v = m.addVar(vtype="C", lb=0, ub=1, obj=units, name=vname)
+            v = m.addVar(vtype="B", obj=units, name=vname)
             for i in range(self.I):
                 q = sum(self.demand[o][i] for o in orders)
                 if q: add_coef(m, cov[i], v, q)
@@ -164,31 +161,16 @@ class Columns:
             for o in orders:
                 add_coef(m, order_cons[o], v, 1) 
             cols[(a, frozenset(orders))] = v
+
         return {"model": m, "cols": cols, "cov": cov,
                 "lb": lb, "ub": ub, "card": card,  "order_cons": order_cons}
-
-
-
-    def _solve_integer(self, pack, time_left):
-            """
-            Convierte todas las columnas actuales en binarias y resuelve
-            el problema entero sin volver a llamar al pricing.
-            """
-            m = pack["model"]
-            m.freeTransform() # vuelve al modelo 'original'
-            for v in m.getVars():
-                if v.name.startswith("col_"):
-                    m.chgVarType(v, "B")
-                    
-            m.setParam("limits/time", max(time_left, 0.1))
-            m.optimize()
 
     def _add_column(self, pack, a, orders, units):
         key = (a, frozenset(orders))
         if key in pack["cols"]:
             return
         m = pack["model"]
-        v = m.addVar(vtype="C", lb=0, ub=1, obj=units,
+        v = m.addVar(vtype="B", obj=units,
                      name=f"col_{a}_" + "_".join(map(str, orders)))
         for i in range(self.I):
             q = sum(self.demand[o][i] for o in orders)
@@ -200,7 +182,7 @@ class Columns:
             add_coef(m, pack["order_cons"][o], v, 1)
         pack["cols"][key] = v
 
-    def Opt_cantidadPasillosFija(self, k, umbral, final_exact=False):
+    def Opt_cantidadPasillosFija(self, k, umbral):
         if k not in self.rmp_cache:
             self.rmp_cache[k] = self._build_rmp(k)
         pack = self.rmp_cache[k];  m = pack["model"]
@@ -229,26 +211,19 @@ class Columns:
                     self._add_column(pack, a, sel, units)
                     any_new = True
             if not any_new:
-                m.freeTransform()
-                for v in m.getVars(): m.chgVarType(v, "B") 
-                m.optimize()
                 break
               
 
             rounds += 1
             if (time.time()-start) >= 0.8*umbral:
                 break
-
-        restante = umbral - (time.time() - start)
-        self._solve_integer(pack, restante)
-        debug_wave = self._extract_incl_slack(pack)
-        print(">> Ola con slack antes de fijar pasillos:", debug_wave)
+        self._last_model = pack["model"]
         return self._extract(pack)
 
     def Opt_PasillosFijos(self, pasillos, umbral):
         """
         Reoptimiza el mejor k fijando exactamente los pasillos =1/0.
-        `pasillos` es un set de índices que deben quedar en 1.
+        pasillos es un set de índices que deben quedar en 1.
         """
         k = len(pasillos)
         pack = self._build_rmp(k)
@@ -258,6 +233,7 @@ class Columns:
             if v.name.startswith(("slack", "dummy")):
                 m.chgVarUb(v, 0.0)
 
+ 
         for a in range(self.A):
             var = pack["cols"].get((a, frozenset()))
             if var is None:
@@ -269,6 +245,7 @@ class Columns:
                 m.chgVarUb(var, 0)
         m.setParam("limits/time", max(umbral, 0.1))
         m.optimize()
+        self._last_model = pack["model"]
         return self._extract(pack)
 
     def Opt_ExplorarCantidadPasillos(self, umbral):
@@ -279,7 +256,11 @@ class Columns:
         while k_list and (time.time()-start) < umbral:
             k = k_list.pop(0)
             rem = umbral - (time.time()-start)
-            sol = self.Opt_cantidadPasillosFija(k, rem, True)
+            sol = self.Opt_cantidadPasillosFija(k, rem)
+            st = self.k_stats[k]
+            st["trials"] += 1
+            if sol:
+                st["best"] = max(st["best"], sol["obj"])
 
             if sol and (best_sol is None or sol["obj"] > best_val or
                          (sol["obj"] == best_val and
@@ -287,7 +268,7 @@ class Columns:
                 best_val = sol["obj"]; best_sol = sol
 
             if best_sol:
-                k_list = self._rankear(k_list, best_sol["aisles"])
+                k_list = self._rankear(k_list)
 
         if best_sol:
             rem = umbral - (time.time()-start)
@@ -297,42 +278,28 @@ class Columns:
         self.best_sol = best_sol
         return best_sol
 
-    def _rankear(self, k_list, best_aisles):
-        """Ordena k_list según lo ‘prometedor’ que es cada k."""
-        return sorted(k_list, key=lambda kk: abs(kk - len(best_aisles)))
+    def _rankear(self, k_list):
+        import math
+        C = 0.5 # parámetro de exploración
+        total_trials = sum(s["trials"] for s in self.k_stats.values()) + 1
 
-    def _extract_incl_slack(self, pack):
-        """Igual que _extract pero permite slack/dummy (para debug)."""
-        m = pack["model"]
-        if m.getStatus() != "optimal":
-            return None
+        def ucb(kk):
+            s = self.k_stats[kk]
+            if s["trials"] == 0: # nunca probado, mas prioridad
+                return float("inf")
+            return s["best"] + C * math.sqrt(math.log(total_trials) / s["trials"])
 
-        ais, ords = set(), set()
-        for v in m.getVars():
-            if v.name.startswith("col_") and m.getVal(v) > 0.5:
-                p = v.name.split("_")
-                ais.add(int(p[1]))
-                ords.update(int(x) for x in p[2:])
-
-        if not ords:
-            return None
-
-        units = sum(sum(self.demand[o]) for o in ords)
-        k     = len(ais) or 1
-        prod  = units / k
-
-        return {"obj": prod, "units": units, "aisles": ais, "orders": ords}
+        # ordenar de mayor a menor score
+        return sorted(k_list, key=lambda kk: -ucb(kk))
 
     def _extract(self, pack):
-        """Devuelve la ola sólo si está libre de slack/dummy."""
         m = pack["model"]
         if m.getStatus() != "optimal":
             return None
 
-        #Si slack o dummy están activos, rechazamos la solución
         for v in m.getVars():
             if v.name.startswith(("slack", "dummy")) and m.getVal(v) > 1e-6:
-                return None # solución infactible
+                return None
 
         ais, ords = set(), set()
         for v in m.getVars():
@@ -359,13 +326,26 @@ class Columns:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("uso: python columns_part5.py input_0001.txt [tiempo_seg]")
         sys.exit(1)
 
     umbral = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     instance = sys.argv[1]
 
     solver = Columns(instance)
+    tic = time.time()
     best = solver.Opt_ExplorarCantidadPasillos(umbral)
-    print("\n== Mejor ola ==")
-    print(best)
+    elapsed  = time.time() - tic
+    if len(sys.argv) > 3: 
+        out_file = sys.argv[3]
+        with open(out_file, "w") as f:
+            json.dump(best, f)
+    m = solver._last_model
+    total_c  = m.getNConss()
+    total_v  = m.getNVars()
+    rmp_v    = sum(1 for v in m.getVars() if v.vtype() == "B")
+    dual_bd  = m.getDualbound()
+
+    print(f"METRICS inst={os.path.basename(instance)} "
+        f"conss={total_c} vars={total_v} vars_rmp={rmp_v} "
+        f"dual={int(dual_bd)} obj={best['obj'] if best else 'NA'} "
+        f"time={elapsed:.1f}")

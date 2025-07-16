@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Explora varios K, guarda la mejor ola y reoptimiza con pasillos fijos.
 Uso: python run_zimpl.py  limite_total_seg
@@ -45,7 +44,7 @@ def solve_one_K(K, tlim):
         os.unlink(solfile)
         return {}
 
-    # ---------- 5) parsear el .sol ----------
+    #5) parsear el .sol ----------
     obj, ais, ords = None, set(), set()
     with open(solfile) as f:
         for line in f:
