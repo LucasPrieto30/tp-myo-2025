@@ -233,9 +233,6 @@ class Columns:
             if (time.time()-start) >= 0.8*umbral:
                 break
         self._last_model = pack["model"]
-        # DEBUG: ola con slack (si hubiera)
-        debug_wave = self._extract_incl_slack(pack)
-        print(">> Ola con slack antes de fijar pasillos:", debug_wave)
         return self._extract(pack)
 
     # ---------------------------------------------------------------------
@@ -299,28 +296,7 @@ class Columns:
         """Ordena k_list según lo ‘prometedor’ que es cada k."""
         return sorted(k_list, key=lambda kk: abs(kk - len(best_aisles)))
 
-    def _extract_incl_slack(self, pack):
-        """Igual que _extract pero permite slack/dummy (para debug)."""
-        m = pack["model"]
-        if m.getStatus() != "optimal":
-            return None
-
-        ais, ords = set(), set()
-        for v in m.getVars():
-            if v.name.startswith("col_") and m.getVal(v) > 0.5:
-                p = v.name.split("_")
-                ais.add(int(p[1]))
-                ords.update(int(x) for x in p[2:])
-
-        if not ords:
-            return None
-
-        units = sum(sum(self.demand[o]) for o in ords)
-        k     = len(ais) or 1
-        prod  = units / k
-
-        return {"obj": prod, "units": units, "aisles": ais, "orders": ords}
-
+    
     # ---------------------------------------------------------------------
     def _extract(self, pack):
         """Devuelve la ola sólo si está libre de slack/dummy."""
