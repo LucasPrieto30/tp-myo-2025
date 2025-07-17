@@ -271,7 +271,6 @@ class Columns:
         
         return self._extract(pack)
 
-    # ---------------------------------------------------------------------
     def Opt_PasillosFijos(self, pasillos, umbral):
 
         k = len(pasillos)
@@ -324,16 +323,14 @@ class Columns:
         """Ordena k_list según lo ‘prometedor’ que es cada k."""
         return sorted(k_list, key=lambda kk: abs(kk - len(best_aisles)))
 
-    # ---------------------------------------------------------------------
     def _extract(self, pack):
         m = pack["model"]
         if m.getStatus() != "optimal":
             return None
 
-        #Si slack o dummy estan activos rechaza la solución
         for v in m.getVars():
             if v.name.startswith(("slack", "dummy")) and m.getVal(v) > 1e-6:
-                return None# solución infactible real
+                return None
 
         ais, ords = set(), set()
         for v in m.getVars():
@@ -377,9 +374,8 @@ if __name__ == "__main__":
     total_c  = m.getNConss()
     total_v  = m.getNVars()
     rmp_v    = sum(1 for v in m.getVars() if v.vtype() == "B")
-    dual_bd  = m.getDualbound()
 
     print(f"METRICS inst={os.path.basename(instance)} "
         f"conss={total_c} vars={total_v} vars_rmp={rmp_v} "
-        f"dual={int(dual_bd)} obj={best['obj'] if best else 'NA'} "
+        f"obj={best['obj'] if best else 'NA'} "
         f"time={elapsed:.1f}")

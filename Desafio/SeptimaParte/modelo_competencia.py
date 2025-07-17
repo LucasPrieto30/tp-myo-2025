@@ -7,20 +7,17 @@ Branch-and-Price *minimalista*:
 
   • Semillas greedy densidad-unidades.
   • Pricer que resuelve un knapsack 0-1 por pasillo y añade columnas.
-  • Variables binarias  ⇒  SCIP hace branch-and-bound por defecto.
+  • Variables binarias - SCIP hace branch-and-bound por defecto.
   • Rankear(k) mediante puntuación UCB.
   • Purga de columnas inactivas ≥ PRUNE_HORIZON rondas.
 """
 
-import sys, time, math
+import sys, time, math, os, json
 from collections import defaultdict
 from typing import List, Dict, Tuple, Set
 
 from pyscipopt import Model, Pricer, quicksum, SCIP_RESULT
 
-# ────────────────────────────────────────────────────────────────────
-#  Utilidades
-# ────────────────────────────────────────────────────────────────────
 def add_coef(model: Model, cons, var, coef):
     if hasattr(model, "addCoefLinear"):
         model.addCoefLinear(cons, var, coef)
@@ -33,11 +30,8 @@ def get_dual(model: Model, cons):
                 if hasattr(model, "getDualsolLinear")
                 else model.getDual(cons))
     except Exception:
-        return 0.0           # restricción eliminada en presolve
+        return 0.0
 
-# ────────────────────────────────────────────────────────────────────
-#  Lectura de instancia
-# ────────────────────────────────────────────────────────────────────
 def read_instance(fname: str):
     with open(fname) as f:
         O, I, A = map(int, f.readline().split())
@@ -56,9 +50,6 @@ def read_instance(fname: str):
         LB, UB = map(int, f.readline().split())
     return O, I, A, demand, supply, LB, UB
 
-# ────────────────────────────────────────────────────────────────────
-#  Sub-problema de pricing (knapsack 0-1 por pasillo)
-# ────────────────────────────────────────────────────────────────────
 def price_column(a: int, dual_cov: List[float],
                  dual_lb: float, dual_ub: float,
                  dual_k: float, dual_ord: List[float],
@@ -98,16 +89,13 @@ def price_column(a: int, dual_cov: List[float],
     units = sum(u_o[o] for o in sel)
     return sel, units, red_cost
 
-# ────────────────────────────────────────────────────────────────────
-#  Pricer
-# ────────────────────────────────────────────────────────────────────
+#Pricer
 class WavePricer(Pricer):
     def __init__(self, solver, pack):
         super().__init__()
         self.solver = solver   # referencia al Solver principal
         self.pack   = pack     # dicc. con modelo y restricciones
 
-    # SCIP llamará a esto mientras exista costo reducido negativo
     def pricerredcost(self):
         m       = self.model
         pack    = self.pack
@@ -129,9 +117,9 @@ class WavePricer(Pricer):
             orders, units, _ = res
             key = (a, frozenset(orders))
             if key in pack["cols"]:
-                continue                      # ya existe
+                continue
 
-            # ── crear la variable en el nodo actual ─────────────────────────
+            #crea la variable en el nodo actual
             name = f"col_{a}_" + "_".join(map(str, orders))
             var  = m.addVar(vtype="B", obj=units, name=name)
 
@@ -145,20 +133,15 @@ class WavePricer(Pricer):
             for o in orders:
                 add_coef(m, pack["order"][o], var, 1)
 
-            m.addPricedVar(var, 1.0)          # coste de columna ya en obj
+            m.addPricedVar(var, 1.0)
             pack["cols"][key] = var
             added = True
 
         return {"result": SCIP_RESULT.SUCCESS if added
                           else SCIP_RESULT.DIDNOTFIND}
 
-    # no usamos branching dinámico → pricerfarkas no necesario
     def pricerfarkas(self):
         return {"result": SCIP_RESULT.DIDNOTRUN}
-
-# ────────────────────────────────────────────────────────────────────
-#  Solver principal
-# ────────────────────────────────────────────────────────────────────
 class Solver:
     PRUNE_HORIZON = 3
     PRUNE_WARMUP  = 5
@@ -170,10 +153,8 @@ class Solver:
 
         self.rmp_cache : Dict[int, dict] = {}
         self.last_seen : Dict[str,int]   = defaultdict(int)
-        self.k_stats   : Dict[int,dict]  = {k:{"best":-1e18,"trials":0}
-                                            for k in range(1,self.A+1)}
+        self.k_stats   : Dict[int,dict]  = {k:{"best":-1e18,"trials":0} for k in range(1,self.A+1)}
 
-    # ---------------------------------------------------------------
     def _greedy_pattern(self, a: int) -> Tuple[List[int], int]:
         units = [(o, sum(self.demand[o])) for o in range(self.O)]
         dens  = lambda t: t[1] / (sum(1 for q in self.demand[t[0]] if q>0) or 1)
@@ -188,7 +169,6 @@ class Solver:
             if tot==self.UB: break
         return sel, tot
 
-    # ---------------------------------------------------------------
     def _build_master(self, k:int):
         m = Model(f"RMP_k{k}"); m.hideOutput(); m.setMaximize()
         zero = m.addVar(lb=0,ub=0,name="zero"); expr0 = 0*zero
@@ -201,7 +181,6 @@ class Solver:
 
         cols={}
 
-        # dummy y slack
         d = m.addVar(vtype="B",obj=-1e6,name="dummy")
         for cons in (lb,ub): add_coef(m,cons,d,self.LB)
         add_coef(m,card,d,1); cols[("dummy",frozenset())]=d
@@ -231,7 +210,6 @@ class Solver:
 
         return pack
 
-    # ---------------------------------------------------------------
     def _purge(self, pack, round_):
         if round_<self.PRUNE_WARMUP: return
         m=pack["model"]; gone=[]
@@ -246,7 +224,6 @@ class Solver:
             for v in gone:
                 m.delVar(v); self.last_seen.pop(v.name,None)
 
-    # ---------------------------------------------------------------
     def solve_for_k(self,k:int,tlim:float):
         pack=self.rmp_cache.setdefault(k,self._build_master(k))
         m=pack["model"]; start=time.time(); rounds=0
@@ -258,21 +235,17 @@ class Solver:
             if m.getStatus()!="optimal": break
             self._purge(pack,rounds)
             ncols_after = len(pack["cols"])
-            if ncols_after == ncols_before:          #  ⇐  nada nuevo → convergió
+            if ncols_after == ncols_before:
                 break
-            # SCIP ya llamó al pricer; si no añadió nada, corte
             if time.time()-start>0.9*tlim: break
         return self._extract(pack)
 
-    # ---------------------------------------------------------------
-    # pura línea para def
     def _ucb(self, k):
         s=self.k_stats[k]
         if s["trials"]==0: return float("inf")
         C=0.5; tot=sum(d["trials"] for d in self.k_stats.values())+1
         return s["best"]+C*math.sqrt(math.log(tot)/s["trials"])
 
-    # ---------------------------------------------------------------
     def solve(self,tlimit:float):
         start=time.time(); best=None; best_val=-1e18
         k_list=list(range(1,self.A+1))
@@ -287,7 +260,6 @@ class Solver:
                 best_val=sol["obj"]; best=sol
         return best
 
-    # ---------------------------------------------------------------
     def _extract(self,pack):
         m=pack["model"]
         if m.getStatus()!="optimal": return None
@@ -305,19 +277,35 @@ class Solver:
         return {"obj":units/len(ais),"units":units,
                 "aisles":sorted(ais),"orders":sorted(ords)}
 
-# ────────────────────────────────────────────────────────────────────
-#  Main
-# ────────────────────────────────────────────────────────────────────
 def main(argv):
     if len(argv)<2:
         print("Uso: python modelo_competencia.py instancia.txt [tiempo_seg]")
         sys.exit(1)
     inst = argv[1]
     tlim = float(argv[2]) if len(argv)>2 else 300
+    start  = time.time()
     solver=Solver(inst)
     best = solver.solve(tlim)
-    print("\n== Mejor ola ==")
-    print(best)
+    elapsed  = time.time() - start
+    if len(sys.argv) > 3: 
+        out_file = sys.argv[3]
+        with open(out_file, "w") as f:
+            json.dump(best, f)
+    if best:
+        k_best = len(best["aisles"])
+        pack   = solver.rmp_cache[k_best]
+        mdl    = pack["model"]
+        total_c = len(mdl.getConss())
+        total_v = len(mdl.getVars())
+    else:
+        total_c = total_v = 0
 
+    rmp_v = sum(len(p["cols"]) for p in solver.rmp_cache.values())
+
+
+    print(f"METRICS inst={os.path.basename(inst)} "
+        f"conss={total_c} vars={total_v} vars_rmp={rmp_v} "
+        f"obj={best['obj'] if best else 'NA'} "
+        f"time={elapsed:.1f}")
 if __name__=="__main__":
     main(sys.argv)
