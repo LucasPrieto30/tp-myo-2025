@@ -1,0 +1,11 @@
+obj 7.200000
+x_0 1
+# x_0 = 1  -> col_43_72_29  a=43  orders=[72, 29]  units=12
+x_1 1
+# x_1 = 1  -> col_51_47  a=51  orders=[47]  units=6
+x_2 1
+# x_2 = 1  -> col_89_57  a=89  orders=[57]  units=7
+x_3 1
+# x_3 = 1  -> col_91_11  a=91  orders=[11]  units=5
+x_4 1
+# x_4 = 1  -> col_93_32_46_62  a=93  orders=[32, 46, 62]  units=6

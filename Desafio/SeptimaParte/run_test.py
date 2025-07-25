@@ -28,7 +28,7 @@ for section in [s for s in cfg if s.startswith("model")]:
     os.makedirs(out_path, exist_ok=True)
 
     csv_rows = []
-    inst_files = sorted(glob.glob(os.path.join(in_path, "instance_*.txt")))[:4]
+    inst_files = sorted(glob.glob(os.path.join(in_path, "*instance_*.txt")))[:4]
 
     model_start = time.time()
 
